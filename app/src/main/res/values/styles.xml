@@ -1,0 +1,10 @@
+<resources>
+    <style name="Theme.TailTune" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="colorPrimary">#7C6DFF</item>
+        <item name="colorPrimaryVariant">#5A4BD6</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="android:navigationBarColor">#111318</item>
+        <item name="android:statusBarColor">#111318</item>
+    </style>
+</resources>

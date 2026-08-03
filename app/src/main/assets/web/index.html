@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#111318">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>TailTune</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>TailTune</h1>
+      <p id="connection">Connecting to Samsung…</p>
+    </div>
+    <button id="refresh" class="icon-button" aria-label="Refresh playlists">↻</button>
+  </header>
+
+  <main>
+    <div id="error" class="error" hidden></div>
+
+    <section class="now-playing">
+      <div class="cover">♪</div>
+      <div class="track-copy">
+        <strong id="now-title">Nothing playing</strong>
+        <span id="now-artist">Choose a playlist</span>
+      </div>
+      <input id="seek" aria-label="Playback position" type="range" min="0" max="1000" value="0">
+      <div class="controls">
+        <button data-control="previous" aria-label="Previous">⏮</button>
+        <button id="toggle" class="primary" aria-label="Play or pause">▶</button>
+        <button data-control="next" aria-label="Next">⏭</button>
+      </div>
+    </section>
+
+    <nav>
+      <button class="tab active" data-view="playlists">Playlists</button>
+      <button class="tab" data-view="queue">Queue</button>
+    </nav>
+
+    <label class="search-wrap">
+      <span>Search</span>
+      <input id="search" type="search" placeholder="Search playlists or tracks">
+    </label>
+
+    <section id="content" aria-live="polite"></section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
