@@ -10,11 +10,13 @@
   --accent: #b8abff;
   --accent-text: #17131f;
   --danger: #ffb4ab;
+  --success: #b8f5c5;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); }
 button, input { font: inherit; }
 button { color: inherit; cursor: pointer; }
+button:disabled { cursor: default; opacity: .55; }
 header {
   position: sticky;
   top: 0;
@@ -31,6 +33,7 @@ header p { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
 main { max-width: 760px; margin: auto; padding: 0 16px 100px; }
 .icon-button { border: 0; background: transparent; width: 48px; height: 48px; font-size: 25px; }
 .error { background: #3c2022; color: var(--danger); border: 1px solid #6f373b; padding: 12px; border-radius: 13px; margin-bottom: 12px; }
+.download-banner { background: var(--panel-2); border: 1px solid var(--line); padding: 11px 12px; border-radius: 13px; margin-bottom: 12px; color: var(--muted); font-size: 14px; }
 .now-playing { padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 20px; }
 .cover { width: 68px; height: 68px; border-radius: 15px; display: grid; place-items: center; background: var(--panel-2); font-size: 30px; float: left; margin-right: 13px; }
 .track-copy { min-height: 68px; display: flex; flex-direction: column; justify-content: center; min-width: 0; }
@@ -46,18 +49,21 @@ nav { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; margin: 18
 .search-wrap span { display: block; font-size: 13px; color: var(--muted); margin-bottom: 5px; }
 #search { width: 100%; border: 1px solid var(--line); border-radius: 13px; background: var(--panel); color: var(--text); padding: 12px 13px; outline: none; }
 #content { margin-top: 14px; }
-.playlist-card { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); padding: 13px; margin-bottom: 9px; }
+.playlist-card { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); padding: 13px; margin-bottom: 9px; }
 .playlist-open { text-align: left; border: 0; background: transparent; padding: 0; min-width: 0; }
 .playlist-open strong, .playlist-open span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .playlist-open span { color: var(--muted); font-size: 14px; margin-top: 5px; }
-.play-button { border: 0; border-radius: 50%; width: 46px; height: 46px; background: var(--accent); color: var(--accent-text); font-size: 18px; }
-.detail-header { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; margin-bottom: 10px; }
+.play-button, .download-button { border: 0; border-radius: 50%; width: 44px; height: 44px; background: var(--accent); color: var(--accent-text); font-size: 18px; }
+.download-button { background: var(--panel-2); color: var(--text); font-size: 16px; }
+.download-button.downloaded { color: var(--success); border: 1px solid color-mix(in srgb, var(--success) 45%, transparent); }
+.detail-header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 8px; margin-bottom: 10px; }
 .detail-header button { min-height: 44px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 0 12px; }
+.detail-header .download-button { padding: 0; border-radius: 50%; }
 .detail-header .play-all { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 .detail-title { min-width: 0; }
 .detail-title strong, .detail-title span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .detail-title span { color: var(--muted); font-size: 13px; margin-top: 3px; }
-.row { display: grid; grid-template-columns: 1fr auto; align-items: center; border-bottom: 1px solid var(--line); min-height: 65px; }
+.row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; border-bottom: 1px solid var(--line); min-height: 65px; }
 .row-main { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; border: 0; background: transparent; padding: 10px 2px; text-align: left; }
 .row strong, .row span { max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .row span { color: var(--muted); font-size: 14px; margin-top: 3px; }
@@ -66,7 +72,7 @@ nav { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; margin: 18
 .current-row { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .empty { text-align: center; color: var(--muted); padding: 40px 10px; }
 .loading { text-align: center; color: var(--muted); padding: 30px 10px; }
-@media (max-width: 430px) {
-  .detail-header { grid-template-columns: auto 1fr; }
+@media (max-width: 500px) {
+  .detail-header { grid-template-columns: auto minmax(0, 1fr) auto; }
   .detail-header .play-all { grid-column: 1 / -1; }
 }

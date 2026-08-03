@@ -7,3 +7,5 @@ captures/
 .cxx/
 *.iml
 .DS_Store
+*.jks
+*.keystore

@@ -1,14 +1,19 @@
 const state = {
   playlists: [],
   playback: null,
+  downloads: new Map(),
+  storage: null,
+  online: false,
   view: "playlists",
   openPlaylist: null,
   search: ""
 };
 
-const $ = (selector) => document.querySelector(selector);
+const $ = selector => document.querySelector(selector);
 const content = $("#content");
 const errorBox = $("#error");
+const downloadBanner = $("#download-banner");
+let downloadSignature = "";
 
 async function api(path, body) {
   const options = body ? {
@@ -32,27 +37,44 @@ function clearError() {
   errorBox.textContent = "";
 }
 
+function setDownloadData(data) {
+  state.storage = data.storage || state.storage;
+  const downloads = data.downloads || [];
+  const nextSignature = JSON.stringify(downloads);
+  const changed = nextSignature !== downloadSignature;
+  downloadSignature = nextSignature;
+  state.downloads = new Map(downloads.map(item => [item.playlistId, item]));
+  renderDownloadBanner();
+  return changed;
+}
+
 async function load() {
   clearError();
   try {
-    const config = await api("/api/config");
-    if (!config.configured) {
-      $("#connection").textContent = "Configure Navidrome on the Samsung";
-      empty("Open TailTune on the Samsung and enter the same Navidrome account used by Substreamer.");
-      return;
-    }
-    const [playlistData, playback] = await Promise.all([
+    const [playlistData, playback, downloadData] = await Promise.all([
       api("/api/playlists"),
-      api("/api/state")
+      api("/api/state"),
+      api("/api/downloads")
     ]);
     state.playlists = playlistData.playlists || [];
     state.playback = playback;
-    $("#connection").textContent = `${state.playlists.length} Navidrome playlists`;
+    state.online = Boolean(playlistData.online);
+    state.storage = playlistData.storage || null;
+    setDownloadData(downloadData);
+    updateConnectionText();
     render();
+    if (playlistData.warning && !state.online) {
+      showError(new Error(`Offline mode: ${playlistData.warning}`));
+    }
   } catch (error) {
     $("#connection").textContent = "Connection failed";
     showError(error);
   }
+}
+
+function updateConnectionText() {
+  const mode = state.online ? "Navidrome online" : "Offline mode";
+  $("#connection").textContent = `${state.playlists.length} playlists · ${mode}`;
 }
 
 async function sendControl(action, extra = {}) {
@@ -81,7 +103,8 @@ function renderPlayer() {
   const playback = state.playback;
   const current = playback?.current;
   $("#now-title").textContent = current?.title || "Nothing playing";
-  $("#now-artist").textContent = current?.artist || "Choose a playlist";
+  const source = current?.offline ? " · Offline" : "";
+  $("#now-artist").textContent = current ? `${current.artist || "Unknown artist"}${source}` : "Choose a playlist";
   $("#toggle").textContent = playback?.playing ? "⏸" : "▶";
   const duration = Math.max(1, playback?.durationMs || 1);
   $("#seek").value = Math.round(((playback?.positionMs || 0) / duration) * 1000);
@@ -101,6 +124,11 @@ function render() {
     renderQueue();
   }
   renderPlayer();
+  renderDownloadBanner();
+}
+
+function downloadFor(playlistId) {
+  return state.downloads.get(playlistId) || null;
 }
 
 function renderPlaylistList() {
@@ -117,9 +145,17 @@ function renderPlaylistList() {
     const title = document.createElement("strong");
     title.textContent = playlist.name;
     const meta = document.createElement("span");
-    meta.textContent = `${playlist.songCount} tracks${playlist.owner ? ` · ${playlist.owner}` : ""}`;
+    const download = downloadFor(playlist.id);
+    const offlineText = download?.complete
+      ? " · Downloaded"
+      : download && download.downloadedCount > 0
+        ? ` · ${download.downloadedCount}/${download.totalCount} offline`
+        : "";
+    meta.textContent = `${playlist.songCount} tracks${playlist.owner ? ` · ${playlist.owner}` : ""}${offlineText}`;
     open.append(title, meta);
     open.addEventListener("click", () => openPlaylist(playlist.id));
+
+    const downloadButton = makeDownloadButton(playlist);
 
     const play = document.createElement("button");
     play.className = "play-button";
@@ -130,9 +166,35 @@ function renderPlaylistList() {
       startIndex: 0
     }));
 
-    card.append(open, play);
+    card.append(open, downloadButton, play);
     content.append(card);
   });
+}
+
+function makeDownloadButton(playlist) {
+  const status = downloadFor(playlist.id);
+  const button = document.createElement("button");
+  button.className = "download-button";
+
+  if (status?.state === "downloading" || status?.state === "queued") {
+    const percent = status.totalCount > 0
+      ? Math.round((status.downloadedCount / status.totalCount) * 100)
+      : 0;
+    button.textContent = `${percent}%`;
+    button.disabled = true;
+    button.setAttribute("aria-label", `Downloading ${playlist.name}`);
+  } else if (status?.complete) {
+    button.textContent = "✓";
+    button.classList.add("downloaded");
+    button.setAttribute("aria-label", `Remove offline copy of ${playlist.name}`);
+    button.addEventListener("click", () => removeDownload(playlist.id, playlist.name));
+  } else {
+    button.textContent = status?.state === "failed" ? "↻" : "⇩";
+    button.setAttribute("aria-label", `Download ${playlist.name}`);
+    button.disabled = !state.online;
+    button.addEventListener("click", () => startDownload(playlist.id));
+  }
+  return button;
 }
 
 function renderPlaylistDetail() {
@@ -155,8 +217,11 @@ function renderPlaylistDetail() {
   const title = document.createElement("strong");
   title.textContent = playlist.name;
   const meta = document.createElement("span");
-  meta.textContent = `${data.songs.length} tracks`;
+  const status = downloadFor(playlist.id);
+  meta.textContent = `${data.songs.length} tracks${status?.complete ? " · Available offline" : ""}`;
   titleBox.append(title, meta);
+
+  const downloadButton = makeDownloadButton(playlist);
 
   const playAll = document.createElement("button");
   playAll.className = "play-all";
@@ -166,7 +231,7 @@ function renderPlaylistDetail() {
     startIndex: 0
   }));
 
-  header.append(back, titleBox, playAll);
+  header.append(back, titleBox, downloadButton, playAll);
   content.append(header);
 
   const songs = data.songs.filter(song =>
@@ -183,7 +248,7 @@ function renderPlaylistDetail() {
     const songTitle = document.createElement("strong");
     songTitle.textContent = `${song.index + 1}. ${song.title}`;
     const songMeta = document.createElement("span");
-    songMeta.textContent = `${song.artist} · ${song.album}`;
+    songMeta.textContent = `${song.artist} · ${song.album}${song.offlineAvailable ? " · Offline" : ""}`;
     main.append(songTitle, songMeta);
     main.addEventListener("click", () => sendControl("playPlaylist", {
       playlistId: playlist.id,
@@ -224,7 +289,7 @@ function renderQueue() {
     const title = document.createElement("strong");
     title.textContent = `${item.index + 1}. ${item.title}`;
     const meta = document.createElement("span");
-    meta.textContent = `${item.artist} · ${item.album}`;
+    meta.textContent = `${item.artist} · ${item.album}${item.offline ? " · Offline" : ""}`;
     main.append(title, meta);
     main.addEventListener("click", () => sendControl("jump", { index: item.index }));
 
@@ -249,6 +314,59 @@ function renderQueue() {
     row.append(main, actions);
     content.append(row);
   });
+}
+
+async function startDownload(playlistId) {
+  clearError();
+  try {
+    const data = await api("/api/download", { playlistId });
+    setDownloadData(data);
+    render();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function removeDownload(playlistId, name) {
+  if (!window.confirm(`Remove the offline copy of “${name}”?`)) return;
+  clearError();
+  try {
+    const data = await api("/api/download/remove", { playlistId });
+    setDownloadData(data);
+    if (state.openPlaylist?.playlist?.id === playlistId) state.openPlaylist = null;
+    render();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function renderDownloadBanner() {
+  const active = [...state.downloads.values()].find(item =>
+    item.state === "downloading" || item.state === "queued"
+  );
+  const failed = [...state.downloads.values()].find(item => item.state === "failed");
+
+  if (active) {
+    const count = `${active.downloadedCount}/${active.totalCount}`;
+    const bytes = active.currentTotalBytes > 0
+      ? ` · ${formatBytes(active.currentBytes)}/${formatBytes(active.currentTotalBytes)}`
+      : "";
+    downloadBanner.textContent = `Downloading ${active.name}: ${count}${bytes}${active.currentSong ? ` · ${active.currentSong}` : ""}`;
+    downloadBanner.hidden = false;
+  } else if (failed) {
+    downloadBanner.textContent = `Download failed for ${failed.name}: ${failed.error || "Unknown error"}`;
+    downloadBanner.hidden = false;
+  } else {
+    downloadBanner.hidden = true;
+    downloadBanner.textContent = "";
+  }
+}
+
+function formatBytes(value) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  return `${(value / Math.pow(1024, index)).toFixed(index > 1 ? 1 : 0)} ${units[index]}`;
 }
 
 async function queueMove(from, to) {
@@ -310,9 +428,12 @@ $("#refresh").addEventListener("click", async () => {
   try {
     const result = await api("/api/refresh", {});
     state.playlists = result.playlists || [];
+    state.online = Boolean(result.online);
+    state.storage = result.storage || state.storage;
     state.openPlaylist = null;
-    $("#connection").textContent = `${state.playlists.length} Navidrome playlists`;
+    updateConnectionText();
     render();
+    if (result.warning && !state.online) showError(new Error(`Offline mode: ${result.warning}`));
   } catch (error) {
     showError(error);
   }
@@ -321,10 +442,16 @@ $("#refresh").addEventListener("click", async () => {
 load();
 setInterval(async () => {
   try {
-    state.playback = await api("/api/state");
+    const [playback, downloads] = await Promise.all([
+      api("/api/state"),
+      api("/api/downloads")
+    ]);
+    state.playback = playback;
+    const downloadsChanged = setDownloadData(downloads);
     renderPlayer();
-    if (state.view === "queue") render();
+    if (state.view === "queue" || (downloadsChanged && !state.openPlaylist)) render();
   } catch (_) {
     // A temporary Wi-Fi interruption should not erase the current screen.
   }
-}, 1200);
+}, 1400);
+

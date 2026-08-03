@@ -4,10 +4,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -26,6 +30,9 @@ class PlaybackService : MediaSessionService() {
     private lateinit var player: ExoPlayer
     private lateinit var mediaSession: MediaSession
     private lateinit var playerHandler: Handler
+    private lateinit var offlineStore: OfflineStore
+    private lateinit var downloadManager: OfflineDownloadManager
+    private lateinit var downloadWakeLock: PowerManager.WakeLock
     private var webServer: TailTuneServer? = null
 
     @Volatile
@@ -38,6 +45,23 @@ class PlaybackService : MediaSessionService() {
         super.onCreate()
         instance = this
         startRemoteForegroundNotification()
+
+        offlineStore = OfflineStore(this)
+        downloadWakeLock = getSystemService(PowerManager::class.java).newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "TailTune:OfflineDownloads"
+        ).apply { setReferenceCounted(false) }
+        downloadManager = OfflineDownloadManager(
+            store = offlineStore,
+            clientProvider = { currentClient() },
+            onDownloadActiveChanged = { active ->
+                if (active && !downloadWakeLock.isHeld) {
+                    downloadWakeLock.acquire(DOWNLOAD_WAKE_LOCK_TIMEOUT_MS)
+                } else if (!active && downloadWakeLock.isHeld) {
+                    downloadWakeLock.release()
+                }
+            }
+        )
 
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
@@ -56,7 +80,9 @@ class PlaybackService : MediaSessionService() {
         mediaSession = MediaSession.Builder(this, player).build()
 
         reloadConfiguration()
-        webServer = TailTuneServer(this, 8787).also { it.start(NanoHttpStartTimeout.SOCKET_READ_TIMEOUT_MS, false) }
+        webServer = TailTuneServer(this, 8787).also {
+            it.start(NanoHttpStartTimeout.SOCKET_READ_TIMEOUT_MS, false)
+        }
     }
 
     fun reloadConfiguration() {
@@ -68,13 +94,28 @@ class PlaybackService : MediaSessionService() {
     fun currentClient(): SubsonicClient = client
         ?: throw IllegalStateException("Configure Navidrome in the TailTune Android app first")
 
+    fun currentClientOrNull(): SubsonicClient? = client
+
+    fun offlineStore(): OfflineStore = offlineStore
+
+    fun downloads(): OfflineDownloadManager = downloadManager
+
     fun playPlaylist(playlist: RemotePlaylist, startIndex: Int = 0) {
         if (playlist.songs.isEmpty()) throw IllegalStateException("This playlist has no playable songs")
-        val activeClient = currentClient()
+        val clientSnapshot = currentClientOrNull()
+        val playable = playlist.songs.mapIndexedNotNull { originalIndex, song ->
+            song.toMediaItemOrNull(clientSnapshot)?.let { originalIndex to it }
+        }
+        if (playable.isEmpty()) {
+            throw IllegalStateException("No downloaded tracks are available and Navidrome is unreachable")
+        }
+
+        val playerStartIndex = playable.indexOfFirst { it.first >= startIndex }
+            .takeIf { it >= 0 }
+            ?: 0
+
         onPlayerThread {
-            val mediaItems = playlist.songs.map { it.toMediaItem(activeClient) }
-            val safeIndex = startIndex.coerceIn(0, mediaItems.lastIndex)
-            player.setMediaItems(mediaItems, safeIndex, 0L)
+            player.setMediaItems(playable.map { it.second }, playerStartIndex, 0L)
             player.prepare()
             player.play()
             lastError = null
@@ -82,9 +123,10 @@ class PlaybackService : MediaSessionService() {
     }
 
     fun addSong(song: RemoteSong) {
-        val activeClient = currentClient()
+        val mediaItem = song.toMediaItemOrNull(currentClientOrNull())
+            ?: throw IllegalStateException("This song is not downloaded and Navidrome is unavailable")
         onPlayerThread {
-            player.addMediaItem(song.toMediaItem(activeClient))
+            player.addMediaItem(mediaItem)
             if (player.playbackState == Player.STATE_IDLE) player.prepare()
         }
     }
@@ -142,6 +184,7 @@ class PlaybackService : MediaSessionService() {
                     .put("title", item.mediaMetadata.title?.toString().orEmpty())
                     .put("artist", item.mediaMetadata.artist?.toString().orEmpty())
                     .put("album", item.mediaMetadata.albumTitle?.toString().orEmpty())
+                    .put("offline", item.localConfiguration?.uri?.scheme == "file")
             )
         }
 
@@ -152,6 +195,7 @@ class PlaybackService : MediaSessionService() {
                 .put("title", item.mediaMetadata.title?.toString().orEmpty())
                 .put("artist", item.mediaMetadata.artist?.toString().orEmpty())
                 .put("album", item.mediaMetadata.albumTitle?.toString().orEmpty())
+                .put("offline", item.localConfiguration?.uri?.scheme == "file")
         } ?: JSONObject.NULL
 
         val duration = player.duration.takeIf { it > 0L } ?: 0L
@@ -164,17 +208,27 @@ class PlaybackService : MediaSessionService() {
             .put("error", lastError ?: JSONObject.NULL)
     }
 
-    private fun RemoteSong.toMediaItem(client: SubsonicClient): MediaItem = MediaItem.Builder()
-        .setMediaId(id)
-        .setUri(client.streamUrl(id))
-        .setMediaMetadata(
-            MediaMetadata.Builder()
-                .setTitle(title)
-                .setArtist(artist)
-                .setAlbumTitle(album)
-                .build()
-        )
-        .build()
+    private fun RemoteSong.toMediaItemOrNull(client: SubsonicClient?): MediaItem? {
+        val localFile = offlineStore.localFile(id)
+        val uri: Uri = when {
+            localFile != null -> Uri.fromFile(localFile)
+            client != null -> Uri.parse(client.streamUrl(id))
+            else -> return null
+        }
+
+        return MediaItem.Builder()
+            .setMediaId(id)
+            .setUri(uri)
+            .setMimeType(contentType)
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(title)
+                    .setArtist(artist)
+                    .setAlbumTitle(album)
+                    .build()
+            )
+            .build()
+    }
 
     private fun <T> onPlayerThread(block: () -> T): T {
         if (Looper.myLooper() == player.applicationLooper) return block()
@@ -191,7 +245,7 @@ class PlaybackService : MediaSessionService() {
                 "TailTune remote",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Keeps the TailTune web remote available"
+                description = "Keeps the TailTune web remote and offline downloads available"
             }
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
@@ -205,24 +259,32 @@ class PlaybackService : MediaSessionService() {
 
         val notification = NotificationCompat.Builder(this, channelId)
             .setSmallIcon(R.drawable.ic_music_note)
-            .setContentTitle("TailTune remote is running")
-            .setContentText("Open the TailTune address from your iPhone")
+            .setContentTitle("TailTune is running")
+            .setContentText("Web remote and offline downloads are available")
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
 
-        startForeground(REMOTE_NOTIFICATION_ID, notification)
+        val serviceTypes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        } else {
+            0
+        }
+        ServiceCompat.startForeground(this, REMOTE_NOTIFICATION_ID, notification, serviceTypes)
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession = mediaSession
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // The web remote is intentionally kept alive after the activity is dismissed.
+        // Keep the web remote, downloads and playback alive after the activity is dismissed.
     }
 
     override fun onDestroy() {
         webServer?.stop()
+        downloadManager.shutdown()
+        if (::downloadWakeLock.isInitialized && downloadWakeLock.isHeld) downloadWakeLock.release()
         mediaSession.release()
         player.release()
         instance = null
@@ -231,6 +293,7 @@ class PlaybackService : MediaSessionService() {
 
     companion object {
         private const val REMOTE_NOTIFICATION_ID = 42
+        private const val DOWNLOAD_WAKE_LOCK_TIMEOUT_MS = 6L * 60L * 60L * 1000L
         @Volatile var instance: PlaybackService? = null
             private set
     }

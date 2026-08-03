@@ -12,6 +12,9 @@ class TailTuneServer(
 
     private val playlistCache = ConcurrentHashMap<String, RemotePlaylist>()
 
+    @Volatile
+    private var navidromeOnline: Boolean = false
+
     override fun serve(session: IHTTPSession): Response {
         return try {
             when {
@@ -20,14 +23,12 @@ class TailTuneServer(
                 session.uri == "/style.css" -> asset("web/style.css", "text/css; charset=utf-8")
 
                 session.uri == "/api/config" && session.method == Method.GET -> json(
-                    JSONObject().put("configured", runCatching { service.currentClient(); true }.getOrDefault(false))
+                    JSONObject()
+                        .put("configured", service.currentClientOrNull() != null)
+                        .put("offlinePlaylistCount", service.offlineStore().allStatuses().size)
                 )
 
-                session.uri == "/api/playlists" && session.method == Method.GET -> {
-                    val playlists = JSONArray()
-                    service.currentClient().getPlaylists().forEach { playlists.put(it.toJson()) }
-                    json(JSONObject().put("playlists", playlists))
-                }
+                session.uri == "/api/playlists" && session.method == Method.GET -> json(playlistsJson())
 
                 session.uri == "/api/playlist" && session.method == Method.GET -> {
                     val id = requiredQuery(session, "id")
@@ -61,11 +62,28 @@ class TailTuneServer(
                     json(service.stateJson())
                 }
 
+                session.uri == "/api/downloads" && session.method == Method.GET -> {
+                    json(service.downloads().statusJson())
+                }
+
+                session.uri == "/api/download" && session.method == Method.POST -> {
+                    val body = parseJsonBody(session)
+                    val playlist = loadPlaylist(body.getString("playlistId"), preferRemote = true)
+                    service.downloads().start(playlist)
+                    json(service.downloads().statusJson())
+                }
+
+                session.uri == "/api/download/remove" && session.method == Method.POST -> {
+                    val body = parseJsonBody(session)
+                    val playlistId = body.getString("playlistId")
+                    service.downloads().cancelAndRemove(playlistId)
+                    playlistCache.remove(playlistId)
+                    json(service.downloads().statusJson())
+                }
+
                 session.uri == "/api/refresh" && session.method == Method.POST -> {
                     playlistCache.clear()
-                    val playlists = JSONArray()
-                    service.currentClient().getPlaylists().forEach { playlists.put(it.toJson()) }
-                    json(JSONObject().put("playlists", playlists))
+                    json(playlistsJson())
                 }
 
                 else -> newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not found")
@@ -73,21 +91,80 @@ class TailTuneServer(
         } catch (error: Exception) {
             val root = rootCause(error)
             json(
-                JSONObject()
-                    .put("error", root.message ?: root.javaClass.simpleName),
+                JSONObject().put("error", root.message ?: root.javaClass.simpleName),
                 Response.Status.INTERNAL_ERROR
             )
         }
     }
 
-    private fun loadPlaylist(id: String): RemotePlaylist = playlistCache[id]
-        ?: service.currentClient().getPlaylist(id).also { playlistCache[id] = it }
+    private fun playlistsJson(): JSONObject {
+        val offlineById = service.offlineStore().listOfflinePlaylists()
+            .associateBy { it.summary.id }
+        val remoteResult = runCatching { service.currentClient().getPlaylists() }
+        val online = remoteResult.isSuccess
+        navidromeOnline = online
+        val warning = remoteResult.exceptionOrNull()?.let(::rootCause)?.message
+
+        val merged = linkedMapOf<String, PlaylistSummary>()
+        remoteResult.getOrDefault(emptyList()).forEach { merged[it.id] = it }
+        offlineById.values.forEach { merged.putIfAbsent(it.summary.id, it.summary) }
+
+        val array = JSONArray()
+        merged.values.sortedBy { it.name.lowercase() }.forEach { summary ->
+            val status = service.offlineStore().getStatus(summary.id)
+            array.put(
+                summary.toJson()
+                    .put("downloadedCount", status?.downloadedCount ?: 0)
+                    .put("offlineTotal", status?.totalCount ?: summary.songCount)
+                    .put("offlineComplete", status?.complete ?: false)
+                    .put("offlineKnown", status != null)
+            )
+        }
+
+        return JSONObject()
+            .put("playlists", array)
+            .put("online", online)
+            .put("warning", warning ?: JSONObject.NULL)
+            .put("storage", service.offlineStore().storageJson())
+    }
+
+    private fun loadPlaylist(id: String, preferRemote: Boolean = false): RemotePlaylist {
+        if (!preferRemote) playlistCache[id]?.let { return it }
+        val offlinePlaylist = service.offlineStore().getPlaylist(id)
+        if (!preferRemote && !navidromeOnline && offlinePlaylist != null) {
+            playlistCache[id] = offlinePlaylist
+            return offlinePlaylist
+        }
+
+        val remoteAttempt = runCatching { service.currentClient().getPlaylist(id) }
+        val playlist = remoteAttempt.getOrNull()
+            ?: offlinePlaylist
+            ?: throw IllegalStateException(
+                remoteAttempt.exceptionOrNull()?.let(::rootCause)?.message
+                    ?: "Playlist is not available offline"
+            )
+
+        playlistCache[id] = playlist
+        return playlist
+    }
 
     private fun playlistJson(playlist: RemotePlaylist): JSONObject {
         val songs = JSONArray()
-        playlist.songs.forEachIndexed { index, song -> songs.put(song.toJson(index)) }
+        playlist.songs.forEachIndexed { index, song ->
+            songs.put(
+                song.toJson(index)
+                    .put("offlineAvailable", service.offlineStore().isSongAvailable(song.id))
+            )
+        }
+        val status = service.offlineStore().getStatus(playlist.summary.id)
         return JSONObject()
-            .put("playlist", playlist.summary.toJson())
+            .put(
+                "playlist",
+                playlist.summary.toJson()
+                    .put("downloadedCount", status?.downloadedCount ?: 0)
+                    .put("offlineTotal", status?.totalCount ?: playlist.songs.size)
+                    .put("offlineComplete", status?.complete ?: false)
+            )
             .put("songs", songs)
     }
 

@@ -31,6 +31,7 @@ class MainActivity : AppCompatActivity() {
         binding.usernameInput.setText(saved.username)
         binding.passwordInput.setText(saved.password)
         showRemoteAddress()
+        showOfflineStorage()
 
         binding.testButton.setOnClickListener { testConnection() }
         binding.startButton.setOnClickListener { saveAndStart() }
@@ -44,11 +45,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveAndStart() {
         val settings = currentSettings()
-        if (!settings.configured) {
+        val hasOfflinePlaylists = OfflineStore(this).allStatuses().isNotEmpty()
+        if (!settings.configured && !hasOfflinePlaylists) {
             binding.statusText.text = "Enter the Navidrome URL, username and password."
             return
         }
-        ServerSettings.save(this, settings)
+        if (settings.configured) ServerSettings.save(this, settings)
 
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
@@ -67,8 +69,9 @@ class MainActivity : AppCompatActivity() {
         } else {
             ContextCompat.startForegroundService(this, Intent(this, PlaybackService::class.java))
         }
-        binding.statusText.text = "Web remote started. Loading your Navidrome playlists."
+        binding.statusText.text = "Web remote started. Use the download button in the iPhone interface to save playlists offline."
         showRemoteAddress()
+        showOfflineStorage()
     }
 
     private fun testConnection() {
@@ -85,6 +88,12 @@ class MainActivity : AppCompatActivity() {
             }.getOrElse { "Connection failed: ${it.message}" }
             runOnUiThread { binding.statusText.text = result }
         }.start()
+    }
+
+    private fun showOfflineStorage() {
+        val storage = OfflineStore(this).storageJson()
+        val location = if (storage.optBoolean("removable", false)) "microSD card" else "phone storage"
+        binding.storageText.text = "Offline storage: $location"
     }
 
     private fun showRemoteAddress() {
