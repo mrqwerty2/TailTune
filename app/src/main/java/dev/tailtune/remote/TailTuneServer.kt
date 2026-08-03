@@ -1,51 +1,65 @@
 package dev.tailtune.remote
 
 import fi.iki.elonen.NanoHTTPD
+import fi.iki.elonen.NanoWSD
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.ConcurrentHashMap
+import java.io.IOException
+import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.Executors
 
 class TailTuneServer(
     private val service: PlaybackService,
     port: Int
-) : NanoHTTPD(port) {
+) : NanoWSD(port) {
 
-    private val playlistCache = ConcurrentHashMap<String, RemotePlaylist>()
+    private val sockets = CopyOnWriteArraySet<RemoteSocket>()
+    private val eventExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "TailTune-WebSocketEvents").apply { isDaemon = true }
+    }
 
-    @Volatile
-    private var navidromeOnline: Boolean = false
+    override fun openWebSocket(handshake: IHTTPSession): WebSocket = RemoteSocket(handshake)
 
-    override fun serve(session: IHTTPSession): Response {
+    override fun serveHttp(session: IHTTPSession): NanoHTTPD.Response {
+        if (session.method == Method.OPTIONS) return corsPreflight()
+
         return try {
             when {
-                session.uri == "/" -> asset("web/index.html", "text/html; charset=utf-8")
-                session.uri == "/app.js" -> asset("web/app.js", "application/javascript; charset=utf-8")
-                session.uri == "/style.css" -> asset("web/style.css", "text/css; charset=utf-8")
+                session.uri == "/" -> asset("web/index.html", "text/html; charset=utf-8", cache = false)
+                session.uri == "/app.js" -> asset("web/app.js", "application/javascript; charset=utf-8", cache = true)
+                session.uri == "/style.css" -> asset("web/style.css", "text/css; charset=utf-8", cache = true)
 
-                session.uri == "/api/config" && session.method == Method.GET -> json(
-                    JSONObject()
-                        .put("configured", service.currentClientOrNull() != null)
-                        .put("offlinePlaylistCount", service.offlineStore().allStatuses().size)
-                )
+                session.uri == "/api/bootstrap" && session.method == Method.GET -> {
+                    json(service.bootstrapJson())
+                }
 
-                session.uri == "/api/playlists" && session.method == Method.GET -> json(playlistsJson())
+                session.uri == "/api/playlists" && session.method == Method.GET -> {
+                    json(service.playlistsJson())
+                }
 
                 session.uri == "/api/playlist" && session.method == Method.GET -> {
                     val id = requiredQuery(session, "id")
-                    json(playlistJson(loadPlaylist(id)))
+                    json(playlistJson(service.librarySync().loadPlaylist(id)))
                 }
 
-                session.uri == "/api/state" && session.method == Method.GET -> json(service.stateJson())
+                session.uri == "/api/state" && session.method == Method.GET -> {
+                    json(service.stateJson())
+                }
+
+                session.uri == "/api/sync" && session.method == Method.POST -> {
+                    service.librarySync().start(force = true)
+                    json(service.playlistsJson())
+                }
 
                 session.uri == "/api/control" && session.method == Method.POST -> {
                     val body = parseJsonBody(session)
                     when (val action = body.optString("action")) {
                         "playPlaylist" -> {
-                            val playlist = loadPlaylist(body.getString("playlistId"))
+                            val playlist = service.librarySync().loadPlaylist(body.getString("playlistId"))
                             service.playPlaylist(playlist, body.optInt("startIndex", 0))
                         }
                         "addFromPlaylist" -> {
-                            val playlist = loadPlaylist(body.getString("playlistId"))
+                            val playlist = service.librarySync().loadPlaylist(body.getString("playlistId"))
                             val index = body.getInt("index")
                             val song = playlist.songs.getOrNull(index)
                                 ?: throw IllegalArgumentException("Song index is out of range")
@@ -68,22 +82,18 @@ class TailTuneServer(
 
                 session.uri == "/api/download" && session.method == Method.POST -> {
                     val body = parseJsonBody(session)
-                    val playlist = loadPlaylist(body.getString("playlistId"), preferRemote = true)
+                    val playlist = service.librarySync().loadPlaylist(
+                        body.getString("playlistId"),
+                        preferRemote = true
+                    )
                     service.downloads().start(playlist)
                     json(service.downloads().statusJson())
                 }
 
                 session.uri == "/api/download/remove" && session.method == Method.POST -> {
                     val body = parseJsonBody(session)
-                    val playlistId = body.getString("playlistId")
-                    service.downloads().cancelAndRemove(playlistId)
-                    playlistCache.remove(playlistId)
+                    service.downloads().cancelAndRemove(body.getString("playlistId"))
                     json(service.downloads().statusJson())
-                }
-
-                session.uri == "/api/refresh" && session.method == Method.POST -> {
-                    playlistCache.clear()
-                    json(playlistsJson())
                 }
 
                 else -> newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not found")
@@ -97,56 +107,46 @@ class TailTuneServer(
         }
     }
 
-    private fun playlistsJson(): JSONObject {
-        val offlineById = service.offlineStore().listOfflinePlaylists()
-            .associateBy { it.summary.id }
-        val remoteResult = runCatching { service.currentClient().getPlaylists() }
-        val online = remoteResult.isSuccess
-        navidromeOnline = online
-        val warning = remoteResult.exceptionOrNull()?.let(::rootCause)?.message
-
-        val merged = linkedMapOf<String, PlaylistSummary>()
-        remoteResult.getOrDefault(emptyList()).forEach { merged[it.id] = it }
-        offlineById.values.forEach { merged.putIfAbsent(it.summary.id, it.summary) }
-
-        val array = JSONArray()
-        merged.values.sortedBy { it.name.lowercase() }.forEach { summary ->
-            val status = service.offlineStore().getStatus(summary.id)
-            array.put(
-                summary.toJson()
-                    .put("downloadedCount", status?.downloadedCount ?: 0)
-                    .put("offlineTotal", status?.totalCount ?: summary.songCount)
-                    .put("offlineComplete", status?.complete ?: false)
-                    .put("offlineKnown", status != null)
-            )
-        }
-
-        return JSONObject()
-            .put("playlists", array)
-            .put("online", online)
-            .put("warning", warning ?: JSONObject.NULL)
-            .put("storage", service.offlineStore().storageJson())
+    fun broadcastSnapshot() = enqueueEvent {
+        event("snapshot", service.bootstrapJson())
     }
 
-    private fun loadPlaylist(id: String, preferRemote: Boolean = false): RemotePlaylist {
-        if (!preferRemote) playlistCache[id]?.let { return it }
-        val offlinePlaylist = service.offlineStore().getPlaylist(id)
-        if (!preferRemote && !navidromeOnline && offlinePlaylist != null) {
-            playlistCache[id] = offlinePlaylist
-            return offlinePlaylist
-        }
-
-        val remoteAttempt = runCatching { service.currentClient().getPlaylist(id) }
-        val playlist = remoteAttempt.getOrNull()
-            ?: offlinePlaylist
-            ?: throw IllegalStateException(
-                remoteAttempt.exceptionOrNull()?.let(::rootCause)?.message
-                    ?: "Playlist is not available offline"
-            )
-
-        playlistCache[id] = playlist
-        return playlist
+    fun broadcastPlayback() = enqueueEvent {
+        event("playback", service.stateJson())
     }
+
+    fun broadcastLibrary() = enqueueEvent {
+        event("library", service.playlistsJson())
+    }
+
+    fun broadcastDownloads() = enqueueEvent {
+        event("downloads", service.downloads().statusJson())
+    }
+
+    override fun stop() {
+        sockets.clear()
+        eventExecutor.shutdownNow()
+        super.stop()
+    }
+
+    private fun enqueueEvent(factory: () -> JSONObject) {
+        if (sockets.isEmpty()) return
+        eventExecutor.submit {
+            val payload = runCatching(factory).getOrNull()?.toString() ?: return@submit
+            sockets.forEach { socket ->
+                try {
+                    socket.send(payload)
+                } catch (_: IOException) {
+                    sockets.remove(socket)
+                }
+            }
+        }
+    }
+
+    private fun event(type: String, data: JSONObject): JSONObject = JSONObject()
+        .put("type", type)
+        .put("data", data)
+        .put("timestamp", System.currentTimeMillis())
 
     private fun playlistJson(playlist: RemotePlaylist): JSONObject {
         val songs = JSONArray()
@@ -178,22 +178,67 @@ class TailTuneServer(
         return JSONObject(files["postData"] ?: "{}")
     }
 
-    private fun asset(path: String, mime: String): Response =
+    private fun asset(path: String, mime: String, cache: Boolean): Response =
         newChunkedResponse(Response.Status.OK, mime, service.assets.open(path)).apply {
-            addHeader("Cache-Control", "no-store")
+            addHeader(
+                "Cache-Control",
+                if (cache) "public, max-age=86400, immutable" else "no-cache, no-store, must-revalidate"
+            )
+            addHeader("X-Content-Type-Options", "nosniff")
         }
 
     private fun json(
         value: JSONObject,
         status: Response.Status = Response.Status.OK
-    ): Response = newFixedLengthResponse(status, "application/json; charset=utf-8", value.toString()).apply {
+    ): Response = newFixedLengthResponse(
+        status,
+        "application/json; charset=utf-8",
+        value.toString()
+    ).apply {
         addHeader("Cache-Control", "no-store")
         addHeader("Access-Control-Allow-Origin", "*")
+        addHeader("Access-Control-Allow-Headers", "Content-Type")
+    }
+
+    private fun corsPreflight(): Response = newFixedLengthResponse(
+        Response.Status.NO_CONTENT,
+        "text/plain",
+        ""
+    ).apply {
+        addHeader("Access-Control-Allow-Origin", "*")
+        addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        addHeader("Access-Control-Allow-Headers", "Content-Type")
     }
 
     private fun rootCause(error: Throwable): Throwable {
         var result = error
         while (result.cause != null && result.cause !== result) result = result.cause!!
         return result
+    }
+
+    private inner class RemoteSocket(handshake: IHTTPSession) : WebSocket(handshake) {
+        override fun onOpen() {
+            sockets += this
+            runCatching { send(event("snapshot", service.bootstrapJson()).toString()) }
+        }
+
+        override fun onClose(
+            code: WebSocketFrame.CloseCode?,
+            reason: String?,
+            initiatedByRemote: Boolean
+        ) {
+            sockets -= this
+        }
+
+        override fun onMessage(message: WebSocketFrame) {
+            // Commands continue to use the HTTP API. WebSocket is intentionally
+            // server-push only, which keeps reconnect behavior simple on iOS.
+        }
+
+        override fun onPong(pong: WebSocketFrame) = Unit
+
+        override fun onException(exception: IOException) {
+            sockets -= this
+        }
     }
 }

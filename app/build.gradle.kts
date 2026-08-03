@@ -11,8 +11,8 @@ android {
         applicationId = "dev.tailtune.remote"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
     }
 
     buildFeatures {
@@ -38,4 +38,5 @@ dependencies {
     implementation("androidx.media3:media3-session:1.10.1")
 
     implementation("org.nanohttpd:nanohttpd:2.3.1")
+    implementation("org.nanohttpd:nanohttpd-websocket:2.3.1")
 }

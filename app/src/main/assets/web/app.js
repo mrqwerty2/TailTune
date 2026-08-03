@@ -3,17 +3,20 @@ const state = {
   playback: null,
   downloads: new Map(),
   storage: null,
-  online: false,
+  sync: { state: "idle", syncing: false, online: false },
   view: "playlists",
   openPlaylist: null,
-  search: ""
+  search: "",
+  socketConnected: false
 };
 
 const $ = selector => document.querySelector(selector);
 const content = $("#content");
 const errorBox = $("#error");
 const downloadBanner = $("#download-banner");
-let downloadSignature = "";
+let socket = null;
+let reconnectDelay = 500;
+let fallbackTimer = null;
 
 async function api(path, body) {
   const options = body ? {
@@ -37,44 +40,109 @@ function clearError() {
   errorBox.textContent = "";
 }
 
-function setDownloadData(data) {
+function applyLibrary(data) {
+  state.playlists = data.playlists || [];
+  state.sync = data.sync || state.sync;
   state.storage = data.storage || state.storage;
-  const downloads = data.downloads || [];
-  const nextSignature = JSON.stringify(downloads);
-  const changed = nextSignature !== downloadSignature;
-  downloadSignature = nextSignature;
-  state.downloads = new Map(downloads.map(item => [item.playlistId, item]));
-  renderDownloadBanner();
-  return changed;
+  updateConnectionText();
 }
 
-async function load() {
+function applyDownloads(data) {
+  state.storage = data.storage || state.storage;
+  state.downloads = new Map((data.downloads || []).map(item => [item.playlistId, item]));
+  renderDownloadBanner();
+}
+
+function applySnapshot(data) {
+  applyLibrary(data.library || {});
+  state.playback = data.playback || state.playback;
+  applyDownloads(data.downloads || {});
+  render();
+}
+
+async function loadBootstrap() {
   clearError();
   try {
-    const [playlistData, playback, downloadData] = await Promise.all([
-      api("/api/playlists"),
-      api("/api/state"),
-      api("/api/downloads")
-    ]);
-    state.playlists = playlistData.playlists || [];
-    state.playback = playback;
-    state.online = Boolean(playlistData.online);
-    state.storage = playlistData.storage || null;
-    setDownloadData(downloadData);
-    updateConnectionText();
-    render();
-    if (playlistData.warning && !state.online) {
-      showError(new Error(`Offline mode: ${playlistData.warning}`));
-    }
+    applySnapshot(await api("/api/bootstrap"));
   } catch (error) {
-    $("#connection").textContent = "Connection failed";
+    $("#connection").textContent = "Samsung not reachable";
     showError(error);
   }
 }
 
+function connectWebSocket() {
+  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  socket = new WebSocket(`${protocol}//${location.host}/ws`);
+
+  socket.addEventListener("open", () => {
+    state.socketConnected = true;
+    reconnectDelay = 500;
+    stopFallbackPolling();
+    updateConnectionText();
+  });
+
+  socket.addEventListener("message", event => {
+    try {
+      const message = JSON.parse(event.data);
+      switch (message.type) {
+        case "snapshot":
+          applySnapshot(message.data || {});
+          break;
+        case "playback":
+          state.playback = message.data;
+          renderPlayer();
+          if (state.view === "queue") renderQueueOnly();
+          break;
+        case "library":
+          applyLibrary(message.data || {});
+          render();
+          break;
+        case "downloads":
+          applyDownloads(message.data || {});
+          render();
+          break;
+      }
+    } catch (error) {
+      showError(error);
+    }
+  });
+
+  socket.addEventListener("close", () => {
+    state.socketConnected = false;
+    updateConnectionText();
+    startFallbackPolling();
+    const delay = reconnectDelay;
+    reconnectDelay = Math.min(reconnectDelay * 2, 10_000);
+    setTimeout(connectWebSocket, delay);
+  });
+
+  socket.addEventListener("error", () => socket.close());
+}
+
+function startFallbackPolling() {
+  if (fallbackTimer) return;
+  fallbackTimer = setInterval(loadBootstrap, 4_000);
+}
+
+function stopFallbackPolling() {
+  if (!fallbackTimer) return;
+  clearInterval(fallbackTimer);
+  fallbackTimer = null;
+}
+
 function updateConnectionText() {
-  const mode = state.online ? "Navidrome online" : "Offline mode";
-  $("#connection").textContent = `${state.playlists.length} playlists · ${mode}`;
+  const live = state.socketConnected ? "Live" : "Reconnecting";
+  let serverMode = "Cached library";
+  if (state.sync?.syncing) {
+    const progress = state.sync.total > 0 ? ` ${state.sync.completed}/${state.sync.total}` : "";
+    serverMode = `Syncing${progress}`;
+  } else if (state.sync?.online) {
+    serverMode = "Navidrome online";
+  } else if (state.playlists.length) {
+    serverMode = "Offline/cached";
+  }
+  $("#connection").textContent = `${state.playlists.length} playlists · ${serverMode} · ${live}`;
 }
 
 async function sendControl(action, extra = {}) {
@@ -82,7 +150,7 @@ async function sendControl(action, extra = {}) {
   try {
     state.playback = await api("/api/control", { action, ...extra });
     renderPlayer();
-    if (state.view === "queue") render();
+    if (state.view === "queue") renderQueueOnly();
   } catch (error) {
     showError(error);
   }
@@ -95,7 +163,9 @@ async function openPlaylist(id) {
     state.openPlaylist = await api(`/api/playlist?id=${encodeURIComponent(id)}`);
     render();
   } catch (error) {
+    state.openPlaylist = null;
     showError(error);
+    render();
   }
 }
 
@@ -104,7 +174,9 @@ function renderPlayer() {
   const current = playback?.current;
   $("#now-title").textContent = current?.title || "Nothing playing";
   const source = current?.offline ? " · Offline" : "";
-  $("#now-artist").textContent = current ? `${current.artist || "Unknown artist"}${source}` : "Choose a playlist";
+  $("#now-artist").textContent = current
+    ? `${current.artist || "Unknown artist"}${source}`
+    : "Choose a playlist";
   $("#toggle").textContent = playback?.playing ? "⏸" : "▶";
   const duration = Math.max(1, playback?.durationMs || 1);
   $("#seek").value = Math.round(((playback?.positionMs || 0) / duration) * 1000);
@@ -125,6 +197,14 @@ function render() {
   }
   renderPlayer();
   renderDownloadBanner();
+  updateConnectionText();
+}
+
+function renderQueueOnly() {
+  if (state.view !== "queue") return;
+  content.replaceChildren();
+  renderQueue();
+  renderPlayer();
 }
 
 function downloadFor(playlistId) {
@@ -134,7 +214,10 @@ function downloadFor(playlistId) {
 function renderPlaylistList() {
   const query = state.search.trim().toLowerCase();
   const playlists = state.playlists.filter(item => item.name.toLowerCase().includes(query));
-  if (!playlists.length) return empty("No matching playlists");
+  if (!playlists.length) {
+    if (state.sync?.syncing) return empty("Library is syncing in the background…");
+    return empty("No matching playlists");
+  }
 
   playlists.forEach(playlist => {
     const card = document.createElement("article");
@@ -191,7 +274,7 @@ function makeDownloadButton(playlist) {
   } else {
     button.textContent = status?.state === "failed" ? "↻" : "⇩";
     button.setAttribute("aria-label", `Download ${playlist.name}`);
-    button.disabled = !state.online;
+    button.disabled = !state.sync?.online;
     button.addEventListener("click", () => startDownload(playlist.id));
   }
   return button;
@@ -222,7 +305,6 @@ function renderPlaylistDetail() {
   titleBox.append(title, meta);
 
   const downloadButton = makeDownloadButton(playlist);
-
   const playAll = document.createElement("button");
   playAll.className = "play-all";
   playAll.textContent = "▶ Play all";
@@ -237,7 +319,7 @@ function renderPlaylistDetail() {
   const songs = data.songs.filter(song =>
     `${song.title} ${song.artist} ${song.album}`.toLowerCase().includes(query)
   );
-  if (!songs.length) return empty("No matching tracks");
+  if (!songs.length) return empty("No matching tracks", false);
 
   songs.forEach(song => {
     const row = document.createElement("article");
@@ -295,22 +377,19 @@ function renderQueue() {
 
     const actions = document.createElement("div");
     actions.className = "row-actions";
-
     const up = document.createElement("button");
     up.textContent = "↑";
     up.disabled = item.index === 0;
     up.addEventListener("click", () => queueMove(item.index, item.index - 1));
-
     const down = document.createElement("button");
     down.textContent = "↓";
     down.disabled = item.index === queue.length - 1;
     down.addEventListener("click", () => queueMove(item.index, item.index + 1));
-
     const remove = document.createElement("button");
     remove.textContent = "×";
     remove.addEventListener("click", () => queueRemove(item.index));
-
     actions.append(up, down, remove);
+
     row.append(main, actions);
     content.append(row);
   });
@@ -319,8 +398,7 @@ function renderQueue() {
 async function startDownload(playlistId) {
   clearError();
   try {
-    const data = await api("/api/download", { playlistId });
-    setDownloadData(data);
+    applyDownloads(await api("/api/download", { playlistId }));
     render();
   } catch (error) {
     showError(error);
@@ -328,11 +406,10 @@ async function startDownload(playlistId) {
 }
 
 async function removeDownload(playlistId, name) {
-  if (!window.confirm(`Remove the offline copy of “${name}”?`)) return;
+  if (!confirm(`Remove the offline copy of ${name}?`)) return;
   clearError();
   try {
-    const data = await api("/api/download/remove", { playlistId });
-    setDownloadData(data);
+    applyDownloads(await api("/api/download/remove", { playlistId }));
     if (state.openPlaylist?.playlist?.id === playlistId) state.openPlaylist = null;
     render();
   } catch (error) {
@@ -355,6 +432,10 @@ function renderDownloadBanner() {
     downloadBanner.hidden = false;
   } else if (failed) {
     downloadBanner.textContent = `Download failed for ${failed.name}: ${failed.error || "Unknown error"}`;
+    downloadBanner.hidden = false;
+  } else if (state.sync?.syncing) {
+    const progress = state.sync.total > 0 ? `${state.sync.completed}/${state.sync.total}` : "starting";
+    downloadBanner.textContent = `Refreshing Navidrome library: ${progress}${state.sync.currentPlaylist ? ` · ${state.sync.currentPlaylist}` : ""}`;
     downloadBanner.hidden = false;
   } else {
     downloadBanner.hidden = true;
@@ -389,8 +470,8 @@ async function queueRemove(index) {
   }
 }
 
-function empty(message) {
-  content.replaceChildren();
+function empty(message, replace = true) {
+  if (replace) content.replaceChildren();
   const block = document.createElement("div");
   block.className = "empty";
   block.textContent = message;
@@ -426,32 +507,12 @@ $("#search").addEventListener("input", event => {
 $("#refresh").addEventListener("click", async () => {
   clearError();
   try {
-    const result = await api("/api/refresh", {});
-    state.playlists = result.playlists || [];
-    state.online = Boolean(result.online);
-    state.storage = result.storage || state.storage;
-    state.openPlaylist = null;
-    updateConnectionText();
+    applyLibrary(await api("/api/sync", {}));
     render();
-    if (result.warning && !state.online) showError(new Error(`Offline mode: ${result.warning}`));
   } catch (error) {
     showError(error);
   }
 });
 
-load();
-setInterval(async () => {
-  try {
-    const [playback, downloads] = await Promise.all([
-      api("/api/state"),
-      api("/api/downloads")
-    ]);
-    state.playback = playback;
-    const downloadsChanged = setDownloadData(downloads);
-    renderPlayer();
-    if (state.view === "queue" || (downloadsChanged && !state.openPlaylist)) render();
-  } catch (_) {
-    // A temporary Wi-Fi interruption should not erase the current screen.
-  }
-}, 1400);
-
+loadBootstrap();
+connectWebSocket();

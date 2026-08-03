@@ -30,7 +30,7 @@ class MainActivity : AppCompatActivity() {
         binding.serverUrlInput.setText(saved.baseUrl)
         binding.usernameInput.setText(saved.username)
         binding.passwordInput.setText(saved.password)
-        showRemoteAddress()
+        showRemoteAddresses()
         showOfflineStorage()
 
         binding.testButton.setOnClickListener { testConnection() }
@@ -45,8 +45,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveAndStart() {
         val settings = currentSettings()
-        val hasOfflinePlaylists = OfflineStore(this).allStatuses().isNotEmpty()
-        if (!settings.configured && !hasOfflinePlaylists) {
+        val hasCachedPlaylists = OfflineStore(this).let { store ->
+            try {
+                store.playlistCount() > 0
+            } finally {
+                store.close()
+            }
+        }
+        if (!settings.configured && !hasCachedPlaylists) {
             binding.statusText.text = "Enter the Navidrome URL, username and password."
             return
         }
@@ -69,8 +75,9 @@ class MainActivity : AppCompatActivity() {
         } else {
             ContextCompat.startForegroundService(this, Intent(this, PlaybackService::class.java))
         }
-        binding.statusText.text = "Web remote started. Use the download button in the iPhone interface to save playlists offline."
-        showRemoteAddress()
+        binding.statusText.text =
+            "Web remote started immediately. Navidrome synchronization now runs in the background."
+        showRemoteAddresses()
         showOfflineStorage()
     }
 
@@ -91,35 +98,53 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showOfflineStorage() {
-        val storage = OfflineStore(this).storageJson()
+        val store = OfflineStore(this)
+        val storage = try {
+            store.storageJson()
+        } finally {
+            store.close()
+        }
         val location = if (storage.optBoolean("removable", false)) "microSD card" else "phone storage"
-        binding.storageText.text = "Offline storage: $location"
+        binding.storageText.text = "Offline storage: $location · SQLite library cache enabled"
     }
 
-    private fun showRemoteAddress() {
-        val ip = localIpv4Address()
-        binding.urlText.text = if (ip != null) "http://$ip:8787" else "Wi-Fi IP unavailable"
+    private fun showRemoteAddresses() {
+        val addresses = ipv4Addresses()
+        val local = addresses.firstOrNull { (_, ip) -> isPrivateLan(ip) }?.second
+        val tailscale = addresses.firstOrNull { (_, ip) -> ip.startsWith("100.") }?.second
+
+        binding.urlText.text = buildString {
+            if (local != null) append("Home Wi-Fi: http://$local:${PlaybackService.REMOTE_PORT}")
+            if (tailscale != null) {
+                if (isNotEmpty()) append('\n')
+                append("Tailscale: http://$tailscale:${PlaybackService.REMOTE_PORT}")
+            }
+            if (isEmpty()) append("Network address unavailable")
+        }
     }
 
-    private fun localIpv4Address(): String? {
-        val candidates = mutableListOf<Pair<Int, String>>()
+    private fun ipv4Addresses(): List<Pair<String, String>> {
+        val result = mutableListOf<Pair<String, String>>()
         val interfaces = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
         for (network in interfaces) {
             if (!network.isUp || network.isLoopback) continue
             for (address in network.inetAddresses.toList()) {
                 if (address is Inet4Address && !address.isLoopbackAddress) {
-                    val ip = address.hostAddress ?: continue
-                    val priority = when {
-                        network.name.startsWith("wlan") -> 0
-                        ip.startsWith("192.168.") -> 1
-                        ip.startsWith("10.") -> 2
-                        ip.startsWith("172.") -> 3
-                        else -> 4
-                    }
-                    candidates += priority to ip
+                    address.hostAddress?.let { result += network.name to it }
                 }
             }
         }
-        return candidates.minByOrNull { it.first }?.second
+        return result.sortedBy { (name, ip) ->
+            when {
+                name.startsWith("wlan") -> 0
+                isPrivateLan(ip) -> 1
+                ip.startsWith("100.") -> 2
+                else -> 3
+            }
+        }
     }
+
+    private fun isPrivateLan(ip: String): Boolean =
+        ip.startsWith("192.168.") || ip.startsWith("10.") ||
+            Regex("^172\\.(1[6-9]|2[0-9]|3[01])\\.").containsMatchIn(ip)
 }

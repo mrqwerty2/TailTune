@@ -21,7 +21,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="Enter the same Navidrome account used by Substreamer. TailTune can download those server-side playlists into its own offline library." />
+            android:text="Enter the same Navidrome account used by Substreamer. The web remote starts instantly from its SQLite cache, then synchronizes Navidrome in the background." />
 
         <EditText
             android:id="@+id/serverUrlInput"
@@ -93,6 +93,6 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
-            android:text="Open the displayed address in Safari on the iPhone. Tap ⇩ beside a playlist to save it offline. Audio remains on this Samsung and its USB-C earphones." />
+            android:text="Open either displayed address in Safari on the iPhone. Playback and download updates arrive live over WebSocket. Audio remains on this Samsung and its USB-C earphones." />
     </LinearLayout>
 </ScrollView>

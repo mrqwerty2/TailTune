@@ -10,7 +10,8 @@ import java.util.concurrent.Executors
 class OfflineDownloadManager(
     private val store: OfflineStore,
     private val clientProvider: () -> SubsonicClient,
-    private val onDownloadActiveChanged: (Boolean) -> Unit = {}
+    private val onDownloadActiveChanged: (Boolean) -> Unit = {},
+    private val onChanged: () -> Unit = {}
 ) {
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "TailTune-Downloads").apply { isDaemon = true }
@@ -30,6 +31,7 @@ class OfflineDownloadManager(
             estimatedTotalBytes = playlist.songs.sumOf { it.sizeBytes.coerceAtLeast(0L) }
         )
         jobs[id] = job
+        notifyChanged()
         executor.submit { runDownload(job, playlist) }
     }
 
@@ -37,6 +39,7 @@ class OfflineDownloadManager(
         jobs[playlistId]?.cancelled = true
         store.removePlaylist(playlistId)
         jobs.remove(playlistId)
+        notifyChanged()
     }
 
     fun statusJson(): JSONObject {
@@ -64,6 +67,7 @@ class OfflineDownloadManager(
     private fun runDownload(job: DownloadJob, playlist: RemotePlaylist) {
         job.state = STATE_DOWNLOADING
         onDownloadActiveChanged(true)
+        notifyChanged()
 
         try {
             if (playlist.songs.isEmpty()) throw IllegalStateException("This playlist is empty")
@@ -75,7 +79,9 @@ class OfflineDownloadManager(
             val required = playlist.songs
                 .filterNot { store.isSongAvailable(it.id) }
                 .sumOf { it.sizeBytes.coerceAtLeast(0L) }
-            if (!unknownSizes && required > 0L && store.storageJson().optLong("usableBytes") < required + MINIMUM_FREE_BYTES) {
+            if (!unknownSizes && required > 0L &&
+                store.storageJson().optLong("usableBytes") < required + MINIMUM_FREE_BYTES
+            ) {
                 throw IllegalStateException("Not enough free space for this playlist")
             }
 
@@ -85,12 +91,14 @@ class OfflineDownloadManager(
                 if (existingFile != null) {
                     store.registerDownloadedSong(playlist.summary.id, song, existingFile)
                     job.completed += 1
+                    notifyChanged()
                     continue
                 }
 
                 job.currentSong = song.title
                 job.currentBytes = 0L
                 job.currentTotalBytes = song.sizeBytes
+                notifyChanged()
 
                 val finalFile = store.targetFile(song)
                 val partial = File(finalFile.parentFile, "${finalFile.name}.part")
@@ -104,6 +112,7 @@ class OfflineDownloadManager(
                         onProgress = { downloaded, total ->
                             job.currentBytes = downloaded
                             job.currentTotalBytes = total
+                            notifyChangedThrottled(job)
                         }
                     )
                     if (job.cancelled) throw CancellationException("Download cancelled")
@@ -115,6 +124,7 @@ class OfflineDownloadManager(
                     }
                     store.registerDownloadedSong(playlist.summary.id, song, finalFile)
                     job.completed += 1
+                    notifyChanged()
                 } catch (error: Throwable) {
                     partial.delete()
                     throw error
@@ -135,7 +145,20 @@ class OfflineDownloadManager(
             job.error = root.message ?: root.javaClass.simpleName
         } finally {
             onDownloadActiveChanged(false)
+            notifyChanged()
         }
+    }
+
+    private fun notifyChangedThrottled(job: DownloadJob) {
+        val now = System.currentTimeMillis()
+        if (now - job.lastNotificationAt >= PROGRESS_EVENT_INTERVAL_MS) {
+            job.lastNotificationAt = now
+            notifyChanged()
+        }
+    }
+
+    private fun notifyChanged() {
+        runCatching(onChanged)
     }
 
     private fun rootCause(error: Throwable): Throwable {
@@ -157,6 +180,7 @@ class OfflineDownloadManager(
         @Volatile var currentBytes: Long = 0L
         @Volatile var currentTotalBytes: Long = 0L
         @Volatile var cancelled: Boolean = false
+        @Volatile var lastNotificationAt: Long = 0L
 
         fun toJson(): JSONObject = JSONObject()
             .put("playlistId", playlistId)
@@ -179,5 +203,6 @@ class OfflineDownloadManager(
         private const val STATE_PAUSED = "paused"
         private const val STATE_FAILED = "failed"
         private const val MINIMUM_FREE_BYTES = 100L * 1024L * 1024L
+        private const val PROGRESS_EVENT_INTERVAL_MS = 500L
     }
 }

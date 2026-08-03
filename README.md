@@ -1,113 +1,125 @@
-# TailTune 0.3 — Offline Navidrome playlists
+# TailTune 0.4 — Realtime remote and SQLite cache
 
 TailTune turns an Android phone into a headless music player controlled from an
 iPhone browser. It connects to Navidrome through the Subsonic API, reads the
-same **server-side playlists** shown in Substreamer, and can now save those
-playlists into its own offline library.
+same server-side playlists shown in Substreamer, downloads selected playlists
+for offline playback, and serves a realtime web remote from the Samsung.
 
-## Features
+## What changed in 0.4
 
-- Browse Navidrome/Substreamer server playlists from Safari on an iPhone.
-- Play, pause, seek, skip, jump within the queue, reorder and remove queue items.
-- Download a full playlist by tapping **⇩** beside it.
-- Prefer the removable microSD card for offline audio when Android exposes one.
-- Fall back to app-specific phone storage when no writable microSD directory is available.
-- Play downloaded playlists when Navidrome or the internet is unavailable.
-- Resume an interrupted playlist download by tapping the download button again.
-- Reuse one downloaded song across several TailTune playlists without storing duplicates.
-- Show download progress and whether the current song is playing locally.
-- Build an installable debug APK automatically with GitHub Actions.
+- The HTTP server starts **before** contacting Navidrome, so the website opens immediately.
+- Playlist and song metadata is cached in a local **SQLite database**.
+- The initial page uses one fast `/api/bootstrap` request instead of waiting for several requests.
+- Playback, queue, download and synchronization updates are pushed over **WebSocket**.
+- The browser falls back to light polling if a WebSocket connection drops.
+- JavaScript and CSS are cached by Safari with versioned URLs.
+- Navidrome synchronization runs on a background executor.
+- Existing 0.3 JSON offline metadata is migrated into SQLite automatically.
+- Both home-Wi-Fi and Tailscale URLs are shown in the Android app when available.
 
-## Important storage behavior
+## Architecture
 
-TailTune cannot read Substreamer's private offline cache on Android 11. Instead,
-it downloads its own copy of the same Navidrome playlists. Offline audio is
-stored in TailTune's app-specific external directory and is deleted if TailTune
-is uninstalled. Removing one offline playlist does not delete a song that is
-still used by another downloaded TailTune playlist.
+```text
+iPhone Safari / Home Screen shortcut
+          |
+          | HTTP commands + WebSocket events
+          v
+TailTune HTTP/WebSocket server on Samsung :8787
+          |
+          +---- SQLite cached library
+          +---- Offline playlist downloader
+          +---- Navidrome/Subsonic client
+          +---- Media3 ExoPlayer and MediaSession
+          |
+          v
+Samsung USB-C audio output
+```
 
-## Install from Android Studio
+The iPhone never receives the audio stream. It sends small remote-control
+messages. Audio is played by the Samsung and therefore goes to the Xiaomi USB-C
+ANC earphones connected to it.
+
+## Build and install
 
 1. Open the project in Android Studio.
-2. Let Gradle sync.
+2. Let Gradle sync and install Android SDK 36 when prompted.
 3. Select the Samsung wireless-ADB device.
 4. Press **Run**.
 5. Enter the same Navidrome URL, username and password used by Substreamer.
-6. Tap **Test Navidrome connection**.
-7. Tap **Save and start web remote**.
-8. Open the displayed `http://<Samsung-IP>:8787` address on the iPhone.
-9. Tap **⇩** beside a playlist and leave TailTune's foreground notification running until it completes.
+6. Press **Save and start web remote**.
+7. Open the displayed home-Wi-Fi or Tailscale URL on the iPhone.
 
-A local Navidrome URL commonly looks like:
+The local address normally resembles:
 
 ```text
-http://192.168.1.10:4533
+http://192.168.1.2:8787
 ```
 
-Do not add `/rest`; TailTune adds it automatically.
-
-## Build an APK locally
-
-In Android Studio use:
+The Tailscale address normally resembles:
 
 ```text
-Build → Build Bundle(s) / APK(s) → Build APK(s)
+http://100.x.x.x:8787
 ```
 
-The APK will be created at:
+## Offline playlists
 
-```text
-app/build/outputs/apk/debug/app-debug.apk
-```
+Tap **⇩** beside a playlist in the iPhone interface. TailTune downloads its own
+copy because Android does not allow it to read Substreamer's private download
+cache. A removable microSD app directory is preferred when Android exposes one.
 
-Install or update it through wireless ADB:
+Downloaded tracks remain playable if Navidrome is unavailable. TailTune keeps
+one local copy of a song even when it belongs to several downloaded playlists.
+
+## Updating an existing TailTune installation
+
+Build from the same computer that built the previous debug APK, then run:
 
 ```bash
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Publish the APK on GitHub
+Version 0.4 keeps the same package name and migrates the 0.3 offline JSON index
+to SQLite. Do not uninstall first if you want to preserve settings and offline
+files.
 
-Build the APK locally first, then from the repository folder run:
+## Build an APK locally
 
-```bash
-cp app/build/outputs/apk/debug/app-debug.apk TailTune-v0.3.0-debug.apk
-
-gh release create v0.3.0 TailTune-v0.3.0-debug.apk \
-  --title "TailTune v0.3.0" \
-  --notes "Adds app-managed offline Navidrome playlist downloads and microSD preference."
+```text
+Build → Build Bundle(s) / APK(s) → Build APK(s)
 ```
 
-Open the repository's **Releases** page on the Samsung, download the APK and
-allow the browser or Files app to install unknown apps when Android asks.
+The APK is written to:
 
-The debug APK is signed by the debug key on the computer that built it. Keep
-building release APKs from the same computer if you want Android to install
-updates without first uninstalling TailTune.
+```text
+app/build/outputs/apk/debug/app-debug.apk
+```
 
-## GitHub Actions
+## Publish a GitHub release
 
-`.github/workflows/android-build.yml` builds a debug APK on every push to
-`main`. Open **Actions → Build Android APK → Artifacts** to download the CI
-build. CI debug signatures can differ between runs, so the locally built APK is
-better for repeat updates on the Samsung.
+```bash
+cp app/build/outputs/apk/debug/app-debug.apk TailTune-v0.4.0-debug.apk
 
-## Offline test
+gh release create v0.4.0 TailTune-v0.4.0-debug.apk \
+  --title "TailTune v0.4.0" \
+  --notes "Adds an instant-start web server, SQLite library cache and realtime WebSocket updates."
+```
 
-1. Download a playlist and wait for the ✓ mark.
-2. Stop Navidrome or disconnect the Samsung from the Navidrome network.
-3. Keep the Samsung and iPhone connected to the same Wi-Fi so the web remote is reachable.
-4. Refresh TailTune. It should show **Offline mode**.
-5. Open and play the downloaded playlist.
+## Security
+
+The web remote currently has no application-level password. Use it only on a
+trusted LAN or inside your private Tailscale tailnet. Do not expose port 8787
+directly to the public internet.
+
+Navidrome credentials remain stored in Android SharedPreferences in this MVP.
+Encrypted credential storage is planned for a later release.
 
 ## Current limitations
 
-- TailTune syncs Navidrome's server-side playlists, not playlists existing only in Substreamer's private database.
-- Downloads run one playlist at a time.
-- There is no per-song download button yet.
-- App-specific offline files are removed when the app is uninstalled.
-- The web remote has no password and must not be exposed directly to the public internet.
-- Navidrome credentials are stored in ordinary Android SharedPreferences in this MVP.
+- TailTune accesses Navidrome server-side playlists, not playlists stored only in Substreamer's private database.
+- Playlist downloads run sequentially.
+- A partially downloaded track restarts from the beginning.
+- App-specific offline files are deleted when TailTune is uninstalled.
+- The WebSocket carries state updates; commands continue to use the HTTP API.
 
 ## License
 

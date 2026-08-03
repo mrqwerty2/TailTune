@@ -32,14 +32,21 @@ class PlaybackService : MediaSessionService() {
     private lateinit var playerHandler: Handler
     private lateinit var offlineStore: OfflineStore
     private lateinit var downloadManager: OfflineDownloadManager
+    private lateinit var librarySyncManager: LibrarySyncManager
     private lateinit var downloadWakeLock: PowerManager.WakeLock
     private var webServer: TailTuneServer? = null
 
-    @Volatile
-    private var client: SubsonicClient? = null
+    @Volatile private var client: SubsonicClient? = null
+    @Volatile private var lastError: String? = null
 
-    @Volatile
-    private var lastError: String? = null
+    private val positionTicker = object : Runnable {
+        override fun run() {
+            if (::player.isInitialized && player.isPlaying) {
+                webServer?.broadcastPlayback()
+            }
+            if (::playerHandler.isInitialized) playerHandler.postDelayed(this, 1_000L)
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -47,21 +54,12 @@ class PlaybackService : MediaSessionService() {
         startRemoteForegroundNotification()
 
         offlineStore = OfflineStore(this)
+        reloadClientOnly()
+
         downloadWakeLock = getSystemService(PowerManager::class.java).newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
             "TailTune:OfflineDownloads"
         ).apply { setReferenceCounted(false) }
-        downloadManager = OfflineDownloadManager(
-            store = offlineStore,
-            clientProvider = { currentClient() },
-            onDownloadActiveChanged = { active ->
-                if (active && !downloadWakeLock.isHeld) {
-                    downloadWakeLock.acquire(DOWNLOAD_WAKE_LOCK_TIMEOUT_MS)
-                } else if (!active && downloadWakeLock.isHeld) {
-                    downloadWakeLock.release()
-                }
-            }
-        )
 
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
@@ -73,22 +71,56 @@ class PlaybackService : MediaSessionService() {
             addListener(object : Player.Listener {
                 override fun onPlayerError(error: PlaybackException) {
                     lastError = error.message ?: error.errorCodeName
+                    webServer?.broadcastPlayback()
+                }
+
+                override fun onEvents(player: Player, events: Player.Events) {
+                    webServer?.broadcastPlayback()
                 }
             })
         }
         playerHandler = Handler(player.applicationLooper)
         mediaSession = MediaSession.Builder(this, player).build()
 
-        reloadConfiguration()
-        webServer = TailTuneServer(this, 8787).also {
-            it.start(NanoHttpStartTimeout.SOCKET_READ_TIMEOUT_MS, false)
+        downloadManager = OfflineDownloadManager(
+            store = offlineStore,
+            clientProvider = { currentClient() },
+            onDownloadActiveChanged = { active ->
+                if (active && !downloadWakeLock.isHeld) {
+                    downloadWakeLock.acquire(DOWNLOAD_WAKE_LOCK_TIMEOUT_MS)
+                } else if (!active && downloadWakeLock.isHeld) {
+                    downloadWakeLock.release()
+                }
+            },
+            onChanged = { webServer?.broadcastDownloads() }
+        )
+
+        librarySyncManager = LibrarySyncManager(
+            store = offlineStore,
+            clientProvider = { currentClientOrNull() },
+            onChanged = { webServer?.broadcastLibrary() }
+        )
+
+        // Start the HTTP/WebSocket server before any Navidrome network work.
+        // This makes the website reachable immediately, even if Navidrome is slow.
+        webServer = TailTuneServer(this, REMOTE_PORT).also {
+            it.start(SOCKET_READ_TIMEOUT_MS, false)
         }
+
+        playerHandler.post(positionTicker)
+        if (currentClientOrNull() != null) librarySyncManager.start(force = false)
     }
 
     fun reloadConfiguration() {
+        reloadClientOnly()
+        lastError = null
+        librarySyncManager.start(force = true)
+        webServer?.broadcastSnapshot()
+    }
+
+    private fun reloadClientOnly() {
         val settings = ServerSettings.load(this)
         client = if (settings.configured) SubsonicClient(settings) else null
-        lastError = null
     }
 
     fun currentClient(): SubsonicClient = client
@@ -99,6 +131,8 @@ class PlaybackService : MediaSessionService() {
     fun offlineStore(): OfflineStore = offlineStore
 
     fun downloads(): OfflineDownloadManager = downloadManager
+
+    fun librarySync(): LibrarySyncManager = librarySyncManager
 
     fun playPlaylist(playlist: RemotePlaylist, startIndex: Int = 0) {
         if (playlist.songs.isEmpty()) throw IllegalStateException("This playlist has no playable songs")
@@ -120,6 +154,7 @@ class PlaybackService : MediaSessionService() {
             player.play()
             lastError = null
         }
+        webServer?.broadcastPlayback()
     }
 
     fun addSong(song: RemoteSong) {
@@ -129,6 +164,7 @@ class PlaybackService : MediaSessionService() {
             player.addMediaItem(mediaItem)
             if (player.playbackState == Player.STATE_IDLE) player.prepare()
         }
+        webServer?.broadcastPlayback()
     }
 
     fun control(action: String, body: JSONObject) {
@@ -151,6 +187,7 @@ class PlaybackService : MediaSessionService() {
                 else -> throw IllegalArgumentException("Unknown control action: $action")
             }
         }
+        webServer?.broadcastPlayback()
     }
 
     fun queueAction(action: String, body: JSONObject) {
@@ -171,6 +208,7 @@ class PlaybackService : MediaSessionService() {
                 else -> throw IllegalArgumentException("Unknown queue action: $action")
             }
         }
+        webServer?.broadcastPlayback()
     }
 
     fun stateJson(): JSONObject = onPlayerThread {
@@ -207,6 +245,31 @@ class PlaybackService : MediaSessionService() {
             .put("queue", queue)
             .put("error", lastError ?: JSONObject.NULL)
     }
+
+    fun playlistsJson(): JSONObject {
+        val statuses = offlineStore.allStatuses().associateBy { it.playlistId }
+        val playlists = JSONArray()
+        offlineStore.listPlaylistSummaries().forEach { summary ->
+            val status = statuses[summary.id]
+            playlists.put(
+                summary.toJson()
+                    .put("downloadedCount", status?.downloadedCount ?: 0)
+                    .put("offlineTotal", status?.totalCount ?: summary.songCount)
+                    .put("offlineComplete", status?.complete ?: false)
+                    .put("offlineKnown", status != null)
+            )
+        }
+        return JSONObject()
+            .put("playlists", playlists)
+            .put("sync", librarySyncManager.statusJson())
+            .put("storage", offlineStore.storageJson())
+    }
+
+    fun bootstrapJson(): JSONObject = JSONObject()
+        .put("version", "0.4.0")
+        .put("library", playlistsJson())
+        .put("playback", stateJson())
+        .put("downloads", downloadManager.statusJson())
 
     private fun RemoteSong.toMediaItemOrNull(client: SubsonicClient?): MediaItem? {
         val localFile = offlineStore.localFile(id)
@@ -260,7 +323,7 @@ class PlaybackService : MediaSessionService() {
         val notification = NotificationCompat.Builder(this, channelId)
             .setSmallIcon(R.drawable.ic_music_note)
             .setContentTitle("TailTune is running")
-            .setContentText("Web remote and offline downloads are available")
+            .setContentText("Realtime web remote and offline music are available")
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -278,27 +341,29 @@ class PlaybackService : MediaSessionService() {
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession = mediaSession
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // Keep the web remote, downloads and playback alive after the activity is dismissed.
+        // Keep the remote, downloads and playback alive after dismissing the activity.
     }
 
     override fun onDestroy() {
+        if (::playerHandler.isInitialized) playerHandler.removeCallbacks(positionTicker)
         webServer?.stop()
-        downloadManager.shutdown()
+        if (::librarySyncManager.isInitialized) librarySyncManager.shutdown()
+        if (::downloadManager.isInitialized) downloadManager.shutdown()
+        if (::offlineStore.isInitialized) offlineStore.close()
         if (::downloadWakeLock.isInitialized && downloadWakeLock.isHeld) downloadWakeLock.release()
-        mediaSession.release()
-        player.release()
+        if (::mediaSession.isInitialized) mediaSession.release()
+        if (::player.isInitialized) player.release()
         instance = null
         super.onDestroy()
     }
 
     companion object {
+        const val REMOTE_PORT = 8787
         private const val REMOTE_NOTIFICATION_ID = 42
         private const val DOWNLOAD_WAKE_LOCK_TIMEOUT_MS = 6L * 60L * 60L * 1000L
+        private const val SOCKET_READ_TIMEOUT_MS = 5_000
+
         @Volatile var instance: PlaybackService? = null
             private set
-    }
-
-    private object NanoHttpStartTimeout {
-        const val SOCKET_READ_TIMEOUT_MS = 5_000
     }
 }
