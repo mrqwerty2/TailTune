@@ -1,0 +1,43 @@
+TailTune 0.6.0 headless build
+
+ANDROID PLAYER
+==============
+
+1. Install JDK 17 and Android SDK 36.
+2. If necessary copy a valid SDK location from your existing project:
+
+   cp ~/Downloads/TailTune-v0.2-Navidrome/local.properties ./local.properties
+
+3. Verify and build:
+
+   python3 tools/static_audit.py
+   python3 tools/fault_simulation.py --output verification/fault-simulation.json
+   ./gradlew clean testDebugUnitTest lintDebug assembleDebug
+
+4. Install OVER the existing package (do not uninstall if you need cache/downloads):
+
+   adb install -r app/build/outputs/apk/debug/app-debug.apk
+
+5. Start the configuration activity:
+
+   adb shell am start -n dev.tailtune.remote/.MainActivity
+
+6. On the dedicated Samsung use Battery > Unrestricted and Never sleeping apps.
+
+NATIVE IPHONE CONTROLLER
+========================
+
+Requires macOS + Xcode:
+
+   brew install xcodegen
+   cd ios
+   xcodegen generate
+   open TailTuneRemote.xcodeproj
+
+Select an Apple signing team and run on the iPhone. Allow Local Network access.
+
+SAFETY
+======
+
+Do not expose TCP 8787 directly to the public internet. Use a trusted LAN/hotspot or private Tailscale network.
+An explicit Android Force stop intentionally prevents background restart until the user opens/starts TailTune again.

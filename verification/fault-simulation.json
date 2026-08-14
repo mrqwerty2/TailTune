@@ -1,0 +1,10 @@
+{
+  "seed": 20260813,
+  "random_trials": 10000,
+  "steps_per_trial": 500,
+  "random_transitions": 5000000,
+  "dedicated_stale_start_races": 100000,
+  "total_modeled_operations": 5100000,
+  "result": "PASS",
+  "note": "Model-based lifecycle simulation; not a substitute for Android device/emulator testing."
+}

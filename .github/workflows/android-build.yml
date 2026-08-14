@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Android quality gate
 
 on:
   push:
@@ -9,9 +9,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build:
+  verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
 
     steps:
       - name: Check out source
@@ -23,23 +28,41 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Gradle 8.13
+      - name: Set up Gradle cache
         uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: "8.13"
-          cache-provider: basic
+
+      - name: Host-independent architecture/fault checks
+        run: |
+          python3 tools/static_audit.py
+          python3 tools/fault_simulation.py --trials 1000 --steps 200 --output verification/ci-fault-simulation.json
+          python3 tools/cache_fault_simulation.py --trials 1000 --steps 200 --output verification/ci-cache-simulation.json
 
       - name: Install Android SDK 36
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-36" "build-tools;35.0.0"
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
+      - name: Unit test, lint and build
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace \
+            clean testDebugUnitTest lintDebug assembleDebug
 
-      - name: Upload APK
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: TailTune-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+      - name: Upload verification reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TailTune-android-verification
+          path: |
+            verification/*.json
+            app/build/reports/tests/
+            app/build/reports/lint-results-debug.html
+            app/build/reports/lint-results-debug.xml
+          if-no-files-found: ignore

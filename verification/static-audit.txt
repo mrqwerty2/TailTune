@@ -1,0 +1,40 @@
+STATIC_AUDIT checks=39 failures=0
+  PASS AndroidManifest.xml parses
+  PASS iOS Info.plist parses
+  PASS manifest permission android.permission.INTERNET
+  PASS manifest permission android.permission.FOREGROUND_SERVICE
+  PASS manifest permission android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK
+  PASS manifest permission android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE
+  PASS manifest permission android.permission.CHANGE_NETWORK_STATE
+  PASS manifest permission android.permission.CHANGE_WIFI_MULTICAST_STATE
+  PASS manifest permission android.permission.WAKE_LOCK
+  PASS manifest permission android.permission.RECEIVE_BOOT_COMPLETED
+  PASS RemoteServerService declared
+  PASS remote FGS uses connectedDevice
+  PASS PlaybackService declared
+  PASS playback FGS uses mediaPlayback
+  PASS MediaSessionService is exported for controller discovery
+  PASS RemoteServerService implements Service.onBind
+  PASS remote service owns TailTuneServer construction
+  PASS playback service does not construct HTTP server
+  PASS old embedded web-server startup removed
+  PASS remote service requests sticky restart
+  PASS remote listener watchdog present
+  PASS stale server-start generation guard present
+  PASS binding lifecycle is explicit
+  PASS playback initialization is polled without exponential delay
+  PASS custom-looper playback has explicit task-removal policy
+  PASS remote enabled flag does not synchronously commit on UI thread
+  PASS SQLite WAL enabled
+  PASS WebSocket request queue is bounded
+  PASS WebSocket request queue has explicit cap
+  PASS HTTP/WebSocket token authentication present
+  PASS HTTP body limit present
+  PASS WebSocket message limit present
+  PASS browser heartbeat uses protocol JSON ping
+  PASS native iOS requests have timeout
+  PASS native iOS reconnect/resume present
+  PASS native iOS prevents bad-token reconnect loop
+  PASS iOS Bonjour entitlement description configured
+  PASS web JavaScript parses with node --check
+  PASS all native iOS Swift sources parse
