@@ -21,7 +21,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="Enter the same Navidrome account used by Substreamer. The web remote starts instantly from its SQLite cache, then synchronizes Navidrome in the background." />
+            android:text="Enter the same Navidrome account used by Substreamer. TailTune starts from its SQLite cache, then synchronizes Navidrome in the background." />
 
         <EditText
             android:id="@+id/serverUrlInput"
@@ -64,7 +64,13 @@
             android:id="@+id/startButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Save and start web remote" />
+            android:text="Save and start TailTune remote" />
+
+        <Button
+            android:id="@+id/stopButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Stop TailTune remote" />
 
         <TextView
             android:id="@+id/statusText"
@@ -93,6 +99,6 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
-            android:text="Open either displayed address in Safari on the iPhone. Playback and download updates arrive live over WebSocket. Audio remains on this Samsung and its USB-C earphones." />
+            android:text="Use the native TailTune iPhone controller or open either secure address in Safari. Playback stays on this Samsung and its USB-C earphones." />
     </LinearLayout>
 </ScrollView>

@@ -61,9 +61,12 @@ data class RemoteSong(
 
     fun preferredExtension(): String {
         val cleanedSuffix = suffix
+            ?.trim()
             ?.lowercase()
-            ?.replace(Regex("[^a-z0-9]"), "")
-            ?.takeIf { it.length in 2..5 }
+            ?.takeIf { candidate ->
+                candidate.length in 2..5 &&
+                        candidate.all { it in 'a'..'z' || it in '0'..'9' }
+            }
         if (cleanedSuffix != null) return cleanedSuffix
 
         return when (contentType?.lowercase()) {

@@ -9,3 +9,22 @@ captures/
 .DS_Store
 *.jks
 *.keystore
+verification/kotlin/*.jar
+verification/*.log
+ios/*.xcodeproj/
+ios/DerivedData/
+
+# Local Android development
+local.properties
+.gradle/
+**/build/
+
+# TailTune debugging backups
+*.bak-*
+.tailtune-backup-*/
+
+# Temporary TailTune patch backups
+.tailtune-backup/
+.tailtune-backup-*/
+*.bak-*
+local.properties

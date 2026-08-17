@@ -7,48 +7,51 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>TailTune</title>
-  <link rel="stylesheet" href="/style.css?v=4">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header>
-    <div>
+    <div class="header-copy">
       <h1>TailTune</h1>
       <p id="connection">Connecting to Samsung…</p>
     </div>
-    <button id="refresh" class="icon-button" aria-label="Refresh playlists">↻</button>
+    <div class="header-actions">
+      <div id="battery-status" class="battery-status" aria-label="Samsung battery level">🔋 --%</div>
+      <button id="refresh" class="icon-button" type="button" aria-label="Refresh playlists">↻</button>
+    </div>
   </header>
 
   <main>
-    <div id="error" class="error" hidden></div>
-    <div id="download-banner" class="download-banner" hidden></div>
+    <div id="error" class="error" role="alert" hidden></div>
+    <div id="download-banner" class="download-banner" aria-live="polite" hidden></div>
 
-    <section class="now-playing">
-      <div class="cover">♪</div>
+    <section class="now-playing" aria-label="Now playing">
+      <div class="cover" aria-hidden="true">♪</div>
       <div class="track-copy">
         <strong id="now-title">Nothing playing</strong>
         <span id="now-artist">Choose a playlist</span>
       </div>
       <input id="seek" aria-label="Playback position" type="range" min="0" max="1000" value="0">
       <div class="controls">
-        <button data-control="previous" aria-label="Previous">⏮</button>
-        <button id="toggle" class="primary" aria-label="Play or pause">▶</button>
-        <button data-control="next" aria-label="Next">⏭</button>
+        <button type="button" data-control="previous" aria-label="Previous">⏮</button>
+        <button type="button" id="toggle" class="primary" aria-label="Play or pause">▶</button>
+        <button type="button" data-control="next" aria-label="Next">⏭</button>
       </div>
     </section>
 
-    <nav>
-      <button class="tab active" data-view="playlists">Playlists</button>
-      <button class="tab" data-view="queue">Queue</button>
+    <nav aria-label="Library views">
+      <button type="button" class="tab active" data-view="playlists">Playlists</button>
+      <button type="button" class="tab" data-view="queue">Queue</button>
     </nav>
 
     <label class="search-wrap">
       <span>Search</span>
-      <input id="search" type="search" placeholder="Search playlists or tracks">
+      <input id="search" type="search" autocomplete="off" placeholder="Search playlists or tracks">
     </label>
 
     <section id="content" aria-live="polite"></section>
   </main>
 
-  <script src="/app.js?v=4"></script>
+  <script src="app.js?v=062-no-stale-token"></script>
 </body>
 </html>

@@ -1,0 +1,9 @@
+{
+  "seed": 1413564748,
+  "random_trials": 3000,
+  "steps_per_trial": 300,
+  "total_modeled_operations": 1000000,
+  "dedicated_shared_file_cases": 100000,
+  "result": "PASS",
+  "note": "Logical model simulation; Android SQLite/filesystem behavior still requires device tests."
+}

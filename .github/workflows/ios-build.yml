@@ -1,0 +1,63 @@
+name: iOS quality gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Select available iPhone simulator
+        id: simulator
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json,sys
+          data=json.load(sys.stdin)
+          for runtime, devices in data.get("devices", {}).items():
+              if "iOS" not in runtime: continue
+              for d in devices:
+                  if d.get("isAvailable") and d.get("name", "").startswith("iPhone"):
+                      print(d["udid"]); raise SystemExit
+          raise SystemExit("No available iPhone simulator")')
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+
+      - name: Build and test native iOS controller
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project TailTuneRemote.xcodeproj \
+            -scheme TailTuneRemote \
+            -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}' \
+            CODE_SIGNING_ALLOWED=NO \
+            test | tee ../verification/ios-xcodebuild.log
+
+      - name: Upload iOS verification log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TailTune-ios-verification
+          path: verification/ios-xcodebuild.log
+          if-no-files-found: ignore
