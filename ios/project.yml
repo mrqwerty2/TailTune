@@ -24,7 +24,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.tailtune.remote.ios
-        PRODUCT_NAME: TailTune
+        PRODUCT_NAME: TailTuneRemote
         MARKETING_VERSION: 0.6.0
         CURRENT_PROJECT_VERSION: 6
         CODE_SIGN_STYLE: Automatic

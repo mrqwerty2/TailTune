@@ -1,0 +1,23 @@
+name: TailTune BLE iOS protocol tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  protocol-tests:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Run BLE protocol tests
+        working-directory: ble-v1.3/iphone/protocol-tests
+        run: swift test

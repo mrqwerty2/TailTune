@@ -63,7 +63,7 @@ final class TailTuneViewModel: ObservableObject {
     func connectManual() {
         let parsed = parseSecureURL(tokenInput)
         let host = manualHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedHost = host.isEmpty ? parsed?.host.orEmpty : host
+        let resolvedHost = host.isEmpty ? (parsed?.host ?? "") : host
         let port: UInt16 = parsed?.port.flatMap { UInt16(exactly: $0) } ?? 8787
 
         guard !resolvedHost.isEmpty else {

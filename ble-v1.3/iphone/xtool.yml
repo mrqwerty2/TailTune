@@ -1,0 +1,5 @@
+version: 1
+bundleID: dev.mahimn.tailtuneble
+product: TailTuneBLE
+infoPath: TailTune-Info.plist
+iconPath: AppIcon.png

@@ -28,3 +28,22 @@ local.properties
 .tailtune-backup-*/
 *.bak-*
 local.properties
+
+# TailTune iPhone generated files
+ble-v1.3/iphone/.bsp/
+ble-v1.3/iphone/xtool/
+ble-v1.3/iphone/.build/
+ble-v1.3/iphone/.swiftpm/
+
+# Android generated files
+**/.gradle/
+**/build/
+**/local.properties
+
+# Private configuration and signing
+.env
+.env.*
+*.keystore
+*.jks
+*.p12
+*.mobileprovision
