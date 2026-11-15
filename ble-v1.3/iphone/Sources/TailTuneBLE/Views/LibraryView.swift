@@ -68,7 +68,13 @@ private struct PlaylistDetailView: View {
         } label: {
           Label("Play playlist", systemImage: "play.fill")
         }
-        .disabled(model.selectedPlaylistTracks.isEmpty)
+        .disabled(model.selectedPlaylistTracks.isEmpty || !model.ble.connectionState.isReady)
+        if model.playlistIsRefreshing {
+          HStack(spacing: 8) {
+            ProgressView()
+            Text("Refreshing playlist…").foregroundStyle(.secondary)
+          }
+        }
       }
       Section("Songs") {
         ForEach(Array(model.selectedPlaylistTracks.enumerated()), id: \.offset) {
@@ -80,6 +86,7 @@ private struct PlaylistDetailView: View {
         }
         if model.playlistHasMore {
           Button("Load more songs") { Task { await model.loadMorePlaylist() } }
+            .disabled(!model.ble.connectionState.isReady)
         }
       }
     }

@@ -21,7 +21,59 @@ final class AppModel: ObservableObject {
   private var localPositionMs = 0
   private var lastPositionTick = Date()
 
+  // Cache only Navidrome metadata; audio files remain on the Samsung.
+  private struct CachedPlaylist: Codable {
+    let tracks: [Track]
+    let hasMore: Bool
+    let songCount: Int?
+    var fetchedAt: Date
+  }
+
+  private struct DiskPlaylistCache: Codable {
+    let playlists: [Playlist]
+    let entries: [String: CachedPlaylist]
+  }
+
+  private var playlistCache: [String: CachedPlaylist] = [:]
+  private let playlistCacheFreshness: TimeInterval = 5 * 60
+  private var playlistRequestID = UUID()
+  private var pendingPlaylistPages = Set<String>()
+  @Published var playlistIsRefreshing = false
+
+  private var playlistCacheURL: URL? {
+    guard let support = FileManager.default.urls(
+      for: .applicationSupportDirectory, in: .userDomainMask
+    ).first else { return nil }
+    return support.appendingPathComponent("TailTune", isDirectory: true)
+      .appendingPathComponent("playlist-metadata-v1.json")
+  }
+
+  private func restorePlaylistCache() {
+    guard let url = playlistCacheURL,
+          let data = try? Data(contentsOf: url),
+          let cache = try? JSONDecoder().decode(DiskPlaylistCache.self, from: data)
+    else { return }
+    playlists = cache.playlists
+    playlistCache = cache.entries
+  }
+
+  private func savePlaylistCache() {
+    guard let url = playlistCacheURL else { return }
+    do {
+      try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+      )
+      let data = try JSONEncoder().encode(
+        DiskPlaylistCache(playlists: playlists, entries: playlistCache)
+      )
+      try data.write(to: url, options: .atomic)
+    } catch {
+      NSLog("TailTune playlist metadata cache could not be saved: %@", String(describing: error))
+    }
+  }
+
   init() {
+    restorePlaylistCache()
     ble.onReady = { [weak self] in
       guard let self else { return }
       Task { @MainActor in
@@ -43,9 +95,8 @@ final class AppModel: ObservableObject {
           self.stopDeviceStatusTimer()
           self.snapshot = nil
           self.queue = []
-          self.playlists = []
+          // Keep cached playlist metadata visible while the Samsung is offline.
           self.searchResults = []
-          self.selectedPlaylistTracks = []
         }
       }
       .store(in: &cancellables)
@@ -75,6 +126,7 @@ final class AppModel: ObservableObject {
       let firstPlaylists = try playlistsJSON.decode(PlaylistPage.self)
       playlists = firstPlaylists.items
       if firstPlaylists.hasMore { await fetchRemainingPlaylists(start: firstPlaylists.items.count) }
+      savePlaylistCache()
       syncLocalProgress()
       errorMessage = snapshot?.error
     } catch {
@@ -125,38 +177,98 @@ final class AppModel: ObservableObject {
   }
 
   func loadPlaylist(_ playlist: Playlist) async {
+    // Invalidate results from an older selection, including A -> B -> A races.
+    playlistRequestID = UUID()
+    let requestID = playlistRequestID
     selectedPlaylist = playlist
-    selectedPlaylistTracks = []
-    playlistHasMore = false
+    let cached = playlistCache[playlist.id]
+    selectedPlaylistTracks = cached?.tracks ?? []
+    playlistHasMore = cached?.hasMore ?? false
+    playlistIsRefreshing = false
+
+    // Cached metadata remains useful even when the Samsung disconnects.
+    guard ble.connectionState.isReady else { return }
+    if let cached,
+       cached.songCount == playlist.songCount,
+       Date().timeIntervalSince(cached.fetchedAt) < playlistCacheFreshness {
+      return
+    }
+
+    playlistIsRefreshing = true
+    defer {
+      if playlistRequestID == requestID { playlistIsRefreshing = false }
+    }
     do {
       let page: TrackPage = try await ble.request(
         op: "playlist_tracks",
         args: ["id": .string(playlist.id), "offset": .int(0), "limit": .int(200)]
       ).decode(TrackPage.self)
-      guard selectedPlaylist?.id == playlist.id else { return }
-      selectedPlaylistTracks = page.items
-      playlistHasMore = page.hasMore
+      guard selectedPlaylist?.id == playlist.id,
+            playlistRequestID == requestID,
+            !Task.isCancelled else { return }
+
+      // Keep already-loaded additional pages only if the refreshed first page
+      // has exactly the same ordered track IDs, duplicates included.
+      let previous = playlistCache[playlist.id]?.tracks ?? []
+      let samePrefix = previous.count > page.items.count &&
+        zip(previous.prefix(page.items.count), page.items)
+          .allSatisfy { $0.0.id == $0.1.id }
+      let tracks: [Track]
+      if page.hasMore && samePrefix {
+        tracks = page.items + Array(previous.dropFirst(page.items.count))
+      } else {
+        tracks = page.items
+      }
+      selectedPlaylistTracks = tracks
+      playlistHasMore = samePrefix
+        ? (playlistCache[playlist.id]?.hasMore ?? page.hasMore)
+        : page.hasMore
+      playlistCache[playlist.id] = CachedPlaylist(
+        tracks: tracks, hasMore: playlistHasMore,
+        songCount: playlist.songCount, fetchedAt: Date()
+      )
+      savePlaylistCache()
     } catch {
-      guard selectedPlaylist?.id == playlist.id else { return }
-      selectedPlaylistTracks = []
+      guard selectedPlaylist?.id == playlist.id,
+            playlistRequestID == requestID else { return }
+      // Preserve usable cached tracks when a background refresh fails.
       errorMessage = error.localizedDescription
     }
   }
 
   func loadMorePlaylist() async {
-    guard let playlist = selectedPlaylist, playlistHasMore else { return }
+    guard let playlist = selectedPlaylist, playlistHasMore,
+          ble.connectionState.isReady,
+          !pendingPlaylistPages.contains(playlist.id) else { return }
+    let offset = selectedPlaylistTracks.count
+    pendingPlaylistPages.insert(playlist.id)
+    defer { pendingPlaylistPages.remove(playlist.id) }
     do {
       let page: TrackPage = try await ble.request(
         op: "playlist_tracks",
-        args: ["id": .string(playlist.id), "offset": .int(selectedPlaylistTracks.count), "limit": .int(200)]
+        args: ["id": .string(playlist.id), "offset": .int(offset), "limit": .int(200)]
       ).decode(TrackPage.self)
-      guard selectedPlaylist?.id == playlist.id else { return }
+      guard selectedPlaylist?.id == playlist.id,
+            selectedPlaylistTracks.count == offset,
+            !Task.isCancelled else { return }
       selectedPlaylistTracks.append(contentsOf: page.items)
       playlistHasMore = page.hasMore
-    } catch { errorMessage = error.localizedDescription }
+      playlistCache[playlist.id] = CachedPlaylist(
+        tracks: selectedPlaylistTracks, hasMore: page.hasMore,
+        songCount: playlist.songCount, fetchedAt: Date()
+      )
+      savePlaylistCache()
+    } catch {
+      guard selectedPlaylist?.id == playlist.id else { return }
+      errorMessage = error.localizedDescription
+    }
   }
 
   func playPlaylist(_ playlist: Playlist, index: Int = 0) async {
+    guard ble.connectionState.isReady else {
+      errorMessage = "Connect to your Samsung to start playback."
+      return
+    }
     do {
       _ = try await ble.request(
         op: "play_playlist",
@@ -219,6 +331,12 @@ final class AppModel: ObservableObject {
       case "queue_changed":
         Task { @MainActor in await refreshQueue() }
       case "library_changed":
+        // Keep cached songs visible, but refresh next time a playlist opens.
+        playlistCache = playlistCache.mapValues { entry in
+          var stale = entry
+          stale.fetchedAt = .distantPast
+          return stale
+        }
         Task { @MainActor in await refreshPlaylists() }
       default:
         break
@@ -235,6 +353,7 @@ final class AppModel: ObservableObject {
       ).decode(PlaylistPage.self)
       playlists = page.items
       if page.hasMore { await fetchRemainingPlaylists(start: page.items.count) }
+      savePlaylistCache()
     } catch { errorMessage = error.localizedDescription }
   }
 
