@@ -37,9 +37,11 @@ jobs:
           python3 tools/fault_simulation.py --trials 1000 --steps 200 --output verification/ci-fault-simulation.json
           python3 tools/cache_fault_simulation.py --trials 1000 --steps 200 --output verification/ci-cache-simulation.json
 
+            - name: Set up Android SDK tools
+        uses: android-actions/setup-android@v4
+
       - name: Install Android SDK 36
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
       - name: Unit test, lint and build
