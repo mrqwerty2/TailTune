@@ -1,0 +1,4 @@
+module TailTuneProtocol {
+header "TailTuneProtocol-Swift.h"
+export *
+}

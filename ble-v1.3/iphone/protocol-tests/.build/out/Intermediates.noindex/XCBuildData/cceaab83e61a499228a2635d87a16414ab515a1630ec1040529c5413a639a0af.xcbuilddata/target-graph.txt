@@ -1,0 +1,13 @@
+Target dependency graph (5 targets)
+Target 'AllIncludingTests' in project 'Aggregate'
+➜ Explicit dependency on target 'TailTuneProtocolTests-product' in project 'TailTuneProtocol'
+➜ Explicit dependency on target 'TailTuneProtocolTests-test-runner' in project 'TailTuneProtocol'
+➜ Explicit dependency on target 'TailTuneProtocol-product' in project 'TailTuneProtocol'
+➜ Explicit dependency on target 'TailTuneProtocol' in project 'TailTuneProtocol'
+Target 'TailTuneProtocol-product' in project 'TailTuneProtocol'
+➜ Explicit dependency on target 'TailTuneProtocol' in project 'TailTuneProtocol'
+Target 'TailTuneProtocolTests-test-runner' in project 'TailTuneProtocol'
+➜ Explicit dependency on target 'TailTuneProtocolTests-product' in project 'TailTuneProtocol'
+Target 'TailTuneProtocolTests-product' in project 'TailTuneProtocol'
+➜ Explicit dependency on target 'TailTuneProtocol' in project 'TailTuneProtocol'
+Target 'TailTuneProtocol' in project 'TailTuneProtocol' (no dependencies)
