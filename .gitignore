@@ -47,3 +47,6 @@ ble-v1.3/iphone/.swiftpm/
 *.jks
 *.p12
 *.mobileprovision
+
+# Swift generated build files
+/ble-v1.3/iphone/protocol-tests/.build/
